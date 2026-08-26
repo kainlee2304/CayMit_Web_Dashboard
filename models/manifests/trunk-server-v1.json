@@ -1,0 +1,20 @@
+{
+  "model_id": "trunk-server-v1",
+  "organ": "trunk",
+  "task": "single_label_classification",
+  "runtime": "mock",
+  "artifact_uri": "mock://trunk-server-v1",
+  "artifact_sha256": "a5112ad5440e0cc7ec7c52c42b8ff3db595e656dcad53792d734232fe193d991",
+  "input_size": [384, 384],
+  "color_space": "RGB",
+  "normalization": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
+  "preprocessing_version": "imagenet-rgb-384-v1",
+  "class_map_version": "trunk-classes-v1",
+  "classes": ["trunk.healthy", "trunk.pink_disease", "trunk.stem_rot", "trunk.borer_damage"],
+  "confidence_thresholds": {"review": 0.6, "high": 0.8},
+  "calibration": {"method": "temperature_scaling", "temperature": 1.0},
+  "source_commit_sha": "development-mock",
+  "created_at": "2026-08-03T00:00:00Z",
+  "status": "active"
+}
+

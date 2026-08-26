@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JackfruitCare Model Manifest",
+  "type": "object",
+  "required": ["model_id", "organ", "runtime", "artifact_sha256", "class_map_version", "preprocessing_version", "classes", "confidence_thresholds"],
+  "properties": {
+    "model_id": {"type": "string"},
+    "organ": {"enum": ["trunk", "fruit"]},
+    "runtime": {"enum": ["mock", "onnx", "pytorch"]},
+    "artifact_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "class_map_version": {"type": "string"},
+    "preprocessing_version": {"type": "string"},
+    "classes": {"type": "array", "minItems": 3, "items": {"type": "string"}, "uniqueItems": true}
+  }
+}
+
