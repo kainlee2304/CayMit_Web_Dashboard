@@ -9,8 +9,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import SensorData, get_db
+from routers.traceability import get_current_user
 
-router = APIRouter(prefix="/api/sensors", tags=["Sensors"])
+router = APIRouter(prefix="/api/sensors", tags=["Sensors"], dependencies=[Depends(get_current_user)])
 
 
 class SensorIn(BaseModel):

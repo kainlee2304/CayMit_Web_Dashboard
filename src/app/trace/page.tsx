@@ -3,7 +3,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Boxes, CheckCircle2, Hash, MapPin, PackageCheck, QrCode, Search, ShieldCheck, XCircle } from "lucide-react";
 import { getTraceBatch, TraceBatch } from "@/lib/api";
-import TraceOperations from "@/components/TraceOperations";
 
 const STAGE_LABELS: Record<string, string> = {
   created: "Khởi tạo", cultivation: "Canh tác", harvest: "Thu hoạch",
@@ -43,8 +42,6 @@ export default function TracePage() {
       </div>
       <form onSubmit={submit} className="mt-6 flex flex-col gap-2 sm:flex-row"><label className="sr-only" htmlFor="trace-code">Mã truy xuất</label><input id="trace-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Ví dụ: TM-260817-A1B2C3" className="min-h-12 min-w-0 flex-1 rounded-xl border border-gray-600 bg-gray-950/70 px-4 text-base font-semibold uppercase text-white outline-none placeholder:normal-case placeholder:text-gray-500 focus:border-emerald-400"/><button disabled={loading || !code.trim()} className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-6 font-bold text-white transition hover:bg-emerald-400 disabled:opacity-50"><Search className="h-5 w-5"/>{loading ? "Đang xác minh…" : "Xác minh"}</button></form>
     </section>
-
-    <TraceOperations onBatch={(value)=>{setBatch(value);setCode(value.trace_code);setError("")}} />
 
     {error && <div className="flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-red-200"><XCircle className="mt-0.5 h-5 w-5 flex-shrink-0"/><p>{error}</p></div>}
 

@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CayMit Operations Platform
 
-## Getting Started
+Nền tảng giám sát bệnh cây mít và truy xuất nguồn gốc theo vai trò. Frontend dùng Next.js static export; backend FastAPI phục vụ API, frontend, AI inference và sổ cái SHA-256.
 
-First, run the development server:
+## Chạy local
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+python -m pip install -r backend/requirements.txt
+npm ci
+npm run build
+cd backend
+python main.py
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Mở `http://localhost:8000/register` để tạo quản trị viên đầu tiên. Các tài khoản đăng ký sau đó phải được admin phê duyệt tại `/admin`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Production
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Sao chép `.env.example` thành `.env`.
+2. Tạo secret ngẫu nhiên tối thiểu 32 byte cho `TRACEABILITY_TOKEN_SECRET`.
+3. Đặt domain thật trong `CORS_ORIGINS`, `TRUSTED_HOSTS` và `PUBLIC_TRACE_URL`.
+4. Đặt `POSTGRES_PASSWORD` mạnh và không commit `.env`.
+5. Chạy sau reverse proxy TLS:
 
-## Learn More
+```bash
+docker compose up -d --build
+```
 
-To learn more about Next.js, take a look at the following resources:
+Sao lưu cả volume `postgres_data` và `uploads`. Health check tại `/health`; OpenAPI docs tự tắt khi `ENVIRONMENT=production`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Mô hình bảo mật
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Tài khoản đầu tiên là admin; đăng ký công khai luôn ở trạng thái chờ duyệt.
+- API dự đoán, cảm biến, thiết bị và thống kê yêu cầu Bearer token.
+- Lô chỉ hiển thị cho chủ sở hữu, admin hoặc đối tác được cấp quyền.
+- Công đoạn bị giới hạn theo role và workflow; lô khóa không nhận thêm dữ liệu.
+- Hành động nhạy cảm được lưu trong `audit_logs` cùng user, IP và thời gian.
+- Sổ cái là chuỗi hash SHA-256 có khả năng phát hiện sửa đổi, không phải blockchain công khai.
 
-## Deploy on Vercel
+## Kiểm tra
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run lint
+npm run build
+cd backend && python -m pytest tests -q
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Việc cần làm theo hạ tầng triển khai
+
+- TLS, WAF/rate limiting và quản lý secrets tại cloud provider.
+- Backup tự động, restore drill, monitoring và cảnh báo.
+- Object storage cho ảnh/chứng từ thay vì filesystem nếu chạy nhiều replica.
+- Alembic migrations chính thức trước khi thay schema trên PostgreSQL production.
+- Chữ ký số hoặc blockchain anchoring nếu cần chống quản trị viên database viết lại chuỗi hash.

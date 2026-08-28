@@ -10,8 +10,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import DeviceState, get_db
+from routers.traceability import get_current_user
 
-router = APIRouter(prefix="/api/devices", tags=["Devices"])
+router = APIRouter(prefix="/api/devices", tags=["Devices"], dependencies=[Depends(get_current_user)])
 
 # Lưu lệnh pending trong memory (Jetson Nano sẽ poll)
 _pending_commands: dict = {}  # device_id -> {"light": True/False}

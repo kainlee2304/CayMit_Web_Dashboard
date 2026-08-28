@@ -8,6 +8,7 @@ from typing import List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -58,21 +59,29 @@ async def lifespan(app: FastAPI):
 
 
 # ─── App Init ─────────────────────────────────────────────────────────────────
+environment = os.getenv("ENVIRONMENT", "development").lower()
 app = FastAPI(
     title="CayMit Disease Detection API",
     description="Hệ thống phát hiện bệnh cây Mít sử dụng YOLO AI",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None if environment == "production" else "/docs",
+    redoc_url=None if environment == "production" else "/redoc",
 )
 
 # CORS - Cho phép FE (Next.js) gọi API
+cors_origins = [value.strip() for value in os.getenv(
+    "CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+).split(",") if value.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Production: thay bằng domain cụ thể
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+trusted_hosts = [value.strip() for value in os.getenv("TRUSTED_HOSTS", "localhost,127.0.0.1").split(",") if value.strip()]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
 # Static files (ảnh upload)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")

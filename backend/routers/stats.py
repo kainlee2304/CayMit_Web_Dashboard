@@ -10,8 +10,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import Prediction, SensorData, get_db
+from routers.traceability import get_current_user
 
-router = APIRouter(prefix="/api/stats", tags=["Statistics"])
+router = APIRouter(prefix="/api/stats", tags=["Statistics"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/summary")

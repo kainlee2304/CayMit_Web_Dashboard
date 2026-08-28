@@ -106,3 +106,60 @@ def test_role_permissions(tmp_path):
         "product_name":"Ẩn danh", "farm_name":"Vườn X", "origin":"X",
     }).status_code == 401
     assert client.get(f"/api/traceability/{code}").status_code == 200
+
+
+def test_batch_ownership_access_workflow_and_pagination(tmp_path):
+    client, _ = make_client(tmp_path)
+    admin_headers = bootstrap(client)
+    for username, role, organization in (
+        ("farm_a", "producer", "HTX A"),
+        ("factory_b", "processor", "Nhà máy B"),
+    ):
+        assert client.post("/api/traceability/users", headers=admin_headers, json={
+            "username": username, "password": "Operator@123", "display_name": username,
+            "organization": organization, "role": role,
+        }).status_code == 201
+
+    def login(username):
+        response = client.post("/api/traceability/auth/login", json={
+            "username": username, "password": "Operator@123",
+        })
+        return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    farm_headers, factory_headers = login("farm_a"), login("factory_b")
+    created = client.post("/api/traceability/batches", headers=farm_headers, json={
+        "product_name": "Mít thật", "farm_name": "Vườn A", "origin": "Quảng Nam",
+    })
+    code = created.json()["trace_code"]
+    assert created.json()["owner_organization"] == "HTX A"
+    assert client.get("/api/traceability/batches", headers=factory_headers).json()["total"] == 0
+    denied = client.post(f"/api/traceability/{code}/events", headers=factory_headers, json={
+        "stage": "processing", "title": "Sơ chế chưa được cấp quyền",
+    })
+    assert denied.status_code == 403
+
+    granted = client.post(f"/api/traceability/batches/{code}/access", headers=farm_headers,
+                          json={"username": "factory_b"})
+    assert granted.status_code == 201
+    listing = client.get("/api/traceability/batches?page=1&page_size=1&search=Mít", headers=factory_headers).json()
+    assert listing["total"] == 1 and listing["pages"] == 1
+    invalid = client.post(f"/api/traceability/{code}/events", headers=factory_headers, json={
+        "stage": "processing", "title": "Sơ chế quá sớm",
+    })
+    assert invalid.status_code == 409
+    assert client.post(f"/api/traceability/{code}/events", headers=farm_headers, json={
+        "stage": "harvest", "title": "Thu hoạch",
+    }).status_code == 201
+    assert client.post(f"/api/traceability/{code}/events", headers=factory_headers, json={
+        "stage": "processing", "title": "Sơ chế",
+    }).status_code == 201
+    locked = client.post(f"/api/traceability/batches/{code}/lock", headers=farm_headers)
+    assert locked.status_code == 200 and locked.json()["locked"] is True
+    assert client.post(f"/api/traceability/{code}/events", headers=factory_headers, json={
+        "stage": "packing", "title": "Không được ghi sau khóa",
+    }).status_code == 409
+
+
+def test_unknown_code_does_not_create_demo_data(tmp_path):
+    client, _ = make_client(tmp_path)
+    assert client.get("/api/traceability/TM-260817-A1B2C3").status_code == 404

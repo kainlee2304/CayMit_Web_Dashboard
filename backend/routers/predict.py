@@ -14,12 +14,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
-from database import Prediction, get_db
+from database import Prediction, TraceBatch, TraceUser, get_db
 from model_service import model_service
+from routers.traceability import _require_batch_access, get_current_user, record_ai_inspection
 from PIL import Image
 import io
 
-router = APIRouter(prefix="/api/predict", tags=["Prediction"])
+router = APIRouter(prefix="/api/predict", tags=["Prediction"], dependencies=[Depends(get_current_user)])
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -33,6 +34,8 @@ class PredictionResponse(BaseModel):
     model_used: str
     image_path: Optional[str]
     device_id: Optional[str]
+    batch_id: Optional[int] = None
+    trace_code: Optional[str] = None
     created_at: datetime
     is_jackfruit: bool = True
     subject_type: Optional[str] = None
@@ -86,6 +89,8 @@ async def predict(
     file: UploadFile = File(...),
     model_name: str = Form(default="auto"),
     device_id: str = Form(default=None),
+    trace_code: str = Form(default=None),
+    user: TraceUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -94,6 +99,14 @@ async def predict(
     # Validate file type
     if not file.content_type.startswith("image/"):
         raise HTTPException(400, "File phải là ảnh!")
+    batch = None
+    if trace_code:
+        batch = db.query(TraceBatch).filter(TraceBatch.trace_code == trace_code.strip().upper()).first()
+        if not batch:
+            raise HTTPException(404, "Không tìm thấy lô để gắn kết quả AI")
+        _require_batch_access(batch, user, db)
+        if batch.locked:
+            raise HTTPException(409, "Lô đã khóa, không thể thêm kiểm định AI")
 
     # Đọc ảnh
     contents = await file.read()
@@ -136,8 +149,13 @@ async def predict(
         model_used=result["model_used"],
         all_scores=result["all_scores"],
         device_id=device_id,
+        batch_id=batch.id if batch else None,
+        trace_code=batch.trace_code if batch else None,
     )
     db.add(db_pred)
+    db.flush()
+    if batch:
+        record_ai_inspection(db, batch, user, db_pred)
     db.commit()
     db.refresh(db_pred)
 
@@ -149,6 +167,8 @@ async def predict(
         model_used=db_pred.model_used,
         image_path=db_pred.image_path,
         device_id=db_pred.device_id,
+        batch_id=db_pred.batch_id,
+        trace_code=db_pred.trace_code,
         created_at=db_pred.created_at,
         is_jackfruit=True,
         subject_type=result.get("subject_type"),
@@ -157,6 +177,33 @@ async def predict(
         identity_model=result.get("identity_model"),
         identity_confidence=result.get("identity_confidence"),
     )
+
+
+def _prediction_response(item: Prediction) -> PredictionResponse:
+    return PredictionResponse(
+        id=item.id, predicted_class=item.predicted_class, confidence=item.confidence,
+        all_scores=json.loads(item.all_scores or "{}"), model_used=item.model_used,
+        image_path=item.image_path, device_id=item.device_id, created_at=item.created_at,
+        batch_id=item.batch_id, trace_code=item.trace_code,
+    )
+
+
+@router.get("/page")
+def get_predictions_page(
+    page: int = 1, page_size: int = 20, predicted_class: Optional[str] = None,
+    device_id: Optional[str] = None, db: Session = Depends(get_db),
+):
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+    query = db.query(Prediction)
+    if predicted_class:
+        query = query.filter(Prediction.predicted_class == predicted_class)
+    if device_id:
+        query = query.filter(Prediction.device_id == device_id)
+    total = query.count()
+    items = query.order_by(Prediction.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {"items": [_prediction_response(item) for item in items], "total": total,
+            "page": page, "page_size": page_size, "pages": (total + page_size - 1) // page_size}
 
 
 @router.get("", response_model=List[PredictionResponse])
@@ -177,16 +224,7 @@ def get_predictions(
     items = query.order_by(Prediction.created_at.desc()).offset(skip).limit(limit).all()
 
     return [
-        PredictionResponse(
-            id=item.id,
-            predicted_class=item.predicted_class,
-            confidence=item.confidence,
-            all_scores=json.loads(item.all_scores or "{}"),
-            model_used=item.model_used,
-            image_path=item.image_path,
-            device_id=item.device_id,
-            created_at=item.created_at,
-        ) for item in items
+        _prediction_response(item) for item in items
     ]
 
 

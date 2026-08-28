@@ -3,14 +3,16 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart2, History, LayoutDashboard, Leaf, Menu, QrCode, Video, X } from "lucide-react";
+import { BarChart2, Boxes, History, LayoutDashboard, Leaf, LogOut, Menu, QrCode, Settings, Video, X } from "lucide-react";
+import { ROLE_LABELS, useAuth } from "@/context/AuthContext";
 
 const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/live", label: "Camera Live", icon: Video },
-  { href: "/history", label: "Lịch Sử", icon: History },
-  { href: "/stats", label: "Thống Kê", icon: BarChart2 },
-  { href: "/trace", label: "Truy Xuất QR", icon: QrCode },
+  { href: "/", label: "Dashboard", icon: LayoutDashboard, roles:["admin","producer","processor"] },
+  { href: "/live", label: "Camera Live", icon: Video, roles:["admin","producer"] },
+  { href: "/history", label: "Lịch Sử AI", icon: History, roles:["admin","producer","processor"] },
+  { href: "/stats", label: "Thống Kê", icon: BarChart2, roles:["admin","producer","processor"] },
+  { href: "/batches", label: "Quản Lý Lô", icon: Boxes, roles:["admin","producer","processor","logistics"] },
+  { href: "/trace", label: "Truy Xuất QR", icon: QrCode, roles:["admin","producer","processor","logistics"] },
 ];
 
 function Brand() {
@@ -29,6 +31,7 @@ function Brand() {
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { user, logout } = useAuth();
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -83,7 +86,7 @@ export default function Sidebar() {
         </div>
 
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
-          {navItems.map(({ href, label, icon: Icon }) => {
+          {navItems.filter(item=>!!user&&item.roles.includes(user.role)).map(({ href, label, icon: Icon }) => {
             const active = pathname === href;
             return (
               <Link
@@ -101,10 +104,12 @@ export default function Sidebar() {
               </Link>
             );
           })}
+          {user?.role==="admin"&&<Link href="/admin" onClick={()=>setOpen(false)} className={`flex min-h-12 items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium ${pathname==="/admin"?"border border-emerald-500/30 bg-emerald-500/20 text-emerald-400":"text-gray-400 hover:bg-gray-800 hover:text-white"}`}><Settings className="h-5 w-5"/>Quản trị</Link>}
         </nav>
 
-        <div className="border-t border-gray-800 px-6 py-4">
-          <p className="text-xs text-gray-600">v1.0.0 · Cây Mít</p>
+        <div className="border-t border-gray-800 px-4 py-4">
+          {user&&<div className="mb-3 rounded-xl bg-gray-950/60 p-3"><p className="truncate text-sm font-bold text-white">{user.display_name}</p><p className="truncate text-xs text-emerald-400">{ROLE_LABELS[user.role]}</p><p className="mt-0.5 truncate text-xs text-gray-500">{user.organization}</p></div>}
+          {user&&<button onClick={()=>{logout();window.location.href="/login"}} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-gray-700 text-sm font-semibold text-gray-300 hover:bg-gray-800"><LogOut className="h-4 w-4"/>Đăng xuất</button>}
         </div>
       </aside>
     </>

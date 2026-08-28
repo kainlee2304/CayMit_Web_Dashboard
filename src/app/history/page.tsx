@@ -3,7 +3,7 @@ import { useState } from "react";
 import useSWR from "swr";
 import { X, AlertTriangle, ShieldCheck, Leaf, CheckCircle, ChevronRight } from "lucide-react";
 import {
-    getPredictions, CLASS_LABELS, CLASS_COLORS, DISEASE_TREATMENTS, Prediction, isHealthyClass,
+    getPredictionsPage, CLASS_LABELS, CLASS_COLORS, DISEASE_TREATMENTS, Prediction, PredictionPage, isHealthyClass,
 } from "@/lib/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ||
@@ -178,16 +178,17 @@ function DetailModal({ p, onClose }: { p: Prediction; onClose: () => void }) {
 // ── Main History Page ────────────────────────────────────────────────
 export default function HistoryPage() {
     const [filterClass, setFilterClass] = useState("");
-    const [page, setPage] = useState(0);
+    const [page, setPage] = useState(1);
     const [selected, setSelected] = useState<Prediction | null>(null);
-    const limit = 40;
+    const limit = 20;
 
-    const { data: predictions = [], isLoading } = useSWR<Prediction[]>(
+    const { data, isLoading } = useSWR<PredictionPage>(
         ["predictions", filterClass, page],
-        () => getPredictions({ limit, skip: page * limit, ...(filterClass ? { predicted_class: filterClass } : {}) }),
+        () => getPredictionsPage({ page, page_size: limit, ...(filterClass ? { predicted_class: filterClass } : {}) }),
         { refreshInterval: 15000 }
     );
 
+    const predictions=data?.items||[];
     const grouped = groupByDay(predictions);
     const days = Object.keys(grouped);
 
@@ -203,7 +204,7 @@ export default function HistoryPage() {
                 {CLASSES.map((cls) => (
                     <button
                         key={cls}
-                        onClick={() => { setFilterClass(cls); setPage(0); }}
+                    onClick={() => { setFilterClass(cls); setPage(1); }}
                         className={`flex-shrink-0 px-4 py-2 rounded-xl text-sm font-medium transition-all ${filterClass === cls
                                 ? "text-white shadow-lg"
                                 : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white"
@@ -270,7 +271,7 @@ export default function HistoryPage() {
                                                     <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: color }} />
                                                     <span className="font-semibold text-white text-sm truncate">{label}</span>
                                                 </div>
-                                                <div className="flex items-center justify-between mt-2">
+                                                {p.trace_code&&<a href={`/trace/?code=${p.trace_code}`} onClick={e=>e.stopPropagation()} className="mt-2 block font-mono text-xs text-emerald-400 hover:underline">Lô {p.trace_code}</a>}<div className="flex items-center justify-between mt-2">
                                                     <span className="text-xs px-2 py-0.5 rounded-full font-medium"
                                                         style={{ background: color + "22", color }}>
                                                         {(p.confidence * 100).toFixed(1)}%
@@ -290,13 +291,13 @@ export default function HistoryPage() {
             )}
 
             {/* Pagination */}
-            <div className="flex gap-2 justify-center pt-2">
-                <button disabled={page === 0} onClick={() => setPage((p) => p - 1)}
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+                <button disabled={page === 1} onClick={() => setPage((p) => p - 1)}
                     className="px-4 py-2 bg-gray-800 rounded-xl text-sm disabled:opacity-40 hover:bg-gray-700 transition">
                     Trước
                 </button>
-                <span className="px-4 py-2 text-gray-400 text-sm">Trang {page + 1}</span>
-                <button disabled={predictions.length < limit} onClick={() => setPage((p) => p + 1)}
+                <span className="px-4 py-2 text-gray-400 text-sm">Trang {page} / {Math.max(data?.pages||0,1)} · {data?.total||0} kết quả</span>
+                <button disabled={page >= (data?.pages||1)} onClick={() => setPage((p) => p + 1)}
                     className="px-4 py-2 bg-gray-800 rounded-xl text-sm disabled:opacity-40 hover:bg-gray-700 transition">
                     Tiếp
                 </button>

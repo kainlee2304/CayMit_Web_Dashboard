@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, UniqueConstraint, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -28,6 +28,8 @@ class Prediction(Base):
     model_used = Column(String, default="best_11")     # Model nào inference
     all_scores = Column(Text, nullable=True)           # JSON scores tất cả class
     device_id = Column(String, nullable=True)          # ID của Jetson Nano
+    batch_id = Column(Integer, ForeignKey("trace_batches.id"), nullable=True, index=True)
+    trace_code = Column(String(32), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -64,7 +66,13 @@ class TraceBatch(Base):
     farm_name = Column(String(180), nullable=False)
     origin = Column(String(240), nullable=False)
     harvest_date = Column(String(20), nullable=True)
+    plot_code = Column(String(80), nullable=True)
+    quantity = Column(Float, nullable=True)
+    unit = Column(String(30), nullable=True)
     status = Column(String(40), nullable=False, default="created")
+    owner_user_id = Column(Integer, ForeignKey("trace_users.id"), nullable=True, index=True)
+    owner_organization = Column(String(180), nullable=True, index=True)
+    locked = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -79,6 +87,9 @@ class TraceUser(Base):
     organization = Column(String(180), nullable=False)
     role = Column(String(30), nullable=False)
     active = Column(Boolean, default=True, nullable=False)
+    approved = Column(Boolean, default=False, nullable=False)
+    approved_by = Column(Integer, ForeignKey("trace_users.id"), nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -101,6 +112,32 @@ class TraceEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class TraceBatchAccess(Base):
+    """Đơn vị được chủ lô cấp quyền tham gia cập nhật hành trình."""
+    __tablename__ = "trace_batch_access"
+    __table_args__ = (UniqueConstraint("batch_id", "user_id", name="uq_trace_batch_user_access"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("trace_batches.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("trace_users.id"), nullable=False, index=True)
+    granted_by = Column(Integer, ForeignKey("trace_users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AuditLog(Base):
+    """Nhật ký bảo mật append-only cho các thao tác nhạy cảm."""
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("trace_users.id"), nullable=True, index=True)
+    action = Column(String(80), nullable=False, index=True)
+    resource_type = Column(String(80), nullable=False, index=True)
+    resource_id = Column(String(120), nullable=True)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 def get_db():
     """Dependency injection - lấy DB session"""
     db = SessionLocal()
@@ -113,3 +150,37 @@ def get_db():
 def create_tables():
     """Tạo tất cả bảng nếu chưa có"""
     Base.metadata.create_all(bind=engine)
+    # create_all không thêm cột vào SQLite đã tồn tại. Migration nhỏ này giữ
+    # dữ liệu MVP cũ và giúp ứng dụng nâng cấp tại chỗ.
+    if DATABASE_URL.startswith("sqlite"):
+        columns = {column["name"] for column in inspect(engine).get_columns("trace_batches")}
+        additions = {
+            "owner_user_id": "INTEGER",
+            "owner_organization": "VARCHAR(180)",
+            "locked": "BOOLEAN NOT NULL DEFAULT 0",
+            "plot_code": "VARCHAR(80)",
+            "quantity": "FLOAT",
+            "unit": "VARCHAR(30)",
+        }
+        with engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(text(f"ALTER TABLE trace_batches ADD COLUMN {name} {definition}"))
+        user_columns = {column["name"] for column in inspect(engine).get_columns("trace_users")}
+        user_additions = {
+            "approved": "BOOLEAN NOT NULL DEFAULT 0",
+            "approved_by": "INTEGER",
+            "last_login_at": "DATETIME",
+        }
+        with engine.begin() as connection:
+            for name, definition in user_additions.items():
+                if name not in user_columns:
+                    connection.execute(text(f"ALTER TABLE trace_users ADD COLUMN {name} {definition}"))
+            # Tài khoản tồn tại trước nâng cấp được giữ hoạt động.
+            connection.execute(text("UPDATE trace_users SET approved = 1 WHERE active = 1 AND approved = 0 AND created_at IS NOT NULL"))
+        prediction_columns = {column["name"] for column in inspect(engine).get_columns("predictions")}
+        with engine.begin() as connection:
+            if "batch_id" not in prediction_columns:
+                connection.execute(text("ALTER TABLE predictions ADD COLUMN batch_id INTEGER"))
+            if "trace_code" not in prediction_columns:
+                connection.execute(text("ALTER TABLE predictions ADD COLUMN trace_code VARCHAR(32)"))

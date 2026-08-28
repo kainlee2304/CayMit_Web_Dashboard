@@ -5,6 +5,14 @@ const API = axios.create({
         (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000"),
 });
 
+API.interceptors.request.use((config) => {
+    if (typeof window !== "undefined") {
+        const token = localStorage.getItem("caymit_access_token") || localStorage.getItem("trace_token");
+        if (token && !config.headers.Authorization) config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
 export type Prediction = {
     id: number;
     predicted_class: string;
@@ -14,7 +22,10 @@ export type Prediction = {
     image_path: string | null;
     device_id: string | null;
     created_at: string;
+    batch_id?: number | null;
+    trace_code?: string | null;
 };
+export type PredictionPage = { items: Prediction[]; total: number; page: number; page_size: number; pages: number };
 
 export type ModelInfo = {
     name: string;
@@ -60,7 +71,12 @@ export type TraceBatch = {
     farm_name: string;
     origin: string;
     harvest_date: string | null;
+    plot_code: string | null;
+    quantity: number | null;
+    unit: string | null;
     status: string;
+    locked: boolean;
+    owner_organization: string | null;
     created_at: string;
     ledger_type: "permissioned_hash_chain";
     verified: boolean;
@@ -70,9 +86,10 @@ export type TraceBatch = {
     qr_url: string;
     events: TraceEvent[];
 };
+export type TraceBatchPage = { items:TraceBatch[]; total:number; page:number; page_size:number; pages:number };
 
 export type TraceRole = "admin" | "producer" | "processor" | "logistics";
-export type TraceUser = { id:number; username:string; display_name:string; organization:string; role:TraceRole; active:boolean };
+export type TraceUser = { id:number; username:string; display_name:string; organization:string; role:TraceRole; active:boolean; approved:boolean; created_at:string; last_login_at:string|null };
 export type TraceAuth = { access_token:string; token_type:"bearer"; user:TraceUser };
 
 const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
@@ -80,6 +97,9 @@ const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
 // API helpers
 export const getPredictions = (params?: Record<string, string | number>) =>
     API.get<Prediction[]>("/api/predict", { params }).then((r) => r.data);
+
+export const getPredictionsPage = (params?: Record<string, string | number>) =>
+    API.get<PredictionPage>("/api/predict/page", { params }).then((r) => r.data);
 
 export const getModels = () =>
     API.get<ModelInfo[]>("/api/predict/models").then((r) => r.data);
@@ -93,8 +113,8 @@ export const getSummary = () =>
 export const getTraceBatch = (code: string) =>
     API.get<TraceBatch>(`/api/traceability/${encodeURIComponent(code)}`).then((r) => r.data);
 
-export const getTraceBatches = () =>
-    API.get<TraceBatch[]>("/api/traceability/batches").then((r) => r.data);
+export const getTraceBatches = (token: string, params?:{page?:number;page_size?:number;search?:string;batch_status?:string}) =>
+    API.get<TraceBatchPage>("/api/traceability/batches", {headers:authHeaders(token),params}).then((r) => r.data);
 
 export const getTraceAuthStatus = () =>
     API.get<{initialized:boolean}>("/api/traceability/auth/status").then((r) => r.data);
@@ -105,20 +125,35 @@ export const bootstrapTraceAdmin = (payload: {username:string;password:string;di
 export const loginTrace = (payload: {username:string;password:string}) =>
     API.post<TraceAuth>("/api/traceability/auth/login", payload).then((r) => r.data);
 
+export const registerTrace = (payload: {username:string;password:string;display_name:string;organization:string;role:Exclude<TraceRole,"admin">}) =>
+    API.post<{message:string;user:TraceUser}>("/api/traceability/auth/register", payload).then((r) => r.data);
+
 export const getTraceMe = (token: string) =>
     API.get<TraceUser>("/api/traceability/auth/me", {headers:authHeaders(token)}).then((r) => r.data);
 
-export const createTraceBatch = (token: string, payload: {product_name:string;variety?:string;farm_name:string;origin:string;harvest_date?:string}) =>
+export const createTraceBatch = (token: string, payload: {product_name:string;variety?:string;farm_name:string;origin:string;harvest_date?:string;plot_code?:string;quantity?:number;unit?:string}) =>
     API.post<TraceBatch>("/api/traceability/batches", payload, {headers:authHeaders(token)}).then((r) => r.data);
 
 export const appendTraceEvent = (token: string, code: string, payload: {stage:string;title:string;location?:string;details?:string}) =>
     API.post<TraceBatch>(`/api/traceability/${encodeURIComponent(code)}/events`, payload, {headers:authHeaders(token)}).then((r) => r.data);
+
+export const grantTraceBatchAccess = (token:string, code:string, username:string) =>
+    API.post<{message:string;user:TraceUser}>(`/api/traceability/batches/${encodeURIComponent(code)}/access`, {username}, {headers:authHeaders(token)}).then(r=>r.data);
+
+export const lockTraceBatch = (token:string, code:string) =>
+    API.post<TraceBatch>(`/api/traceability/batches/${encodeURIComponent(code)}/lock`, null, {headers:authHeaders(token)}).then(r=>r.data);
 
 export const getTraceUsers = (token: string) =>
     API.get<TraceUser[]>("/api/traceability/users", {headers:authHeaders(token)}).then((r) => r.data);
 
 export const createTraceUser = (token: string, payload: {username:string;password:string;display_name:string;organization:string;role:TraceRole}) =>
     API.post<TraceUser>("/api/traceability/users", payload, {headers:authHeaders(token)}).then((r) => r.data);
+
+export const updateTraceUserStatus = (token:string,userId:number,payload:{approved:boolean;active:boolean}) =>
+    API.patch<TraceUser>(`/api/traceability/users/${userId}`,payload,{headers:authHeaders(token)}).then(r=>r.data);
+
+export type AuditLog={id:number;user_id:number|null;action:string;resource_type:string;resource_id:string|null;details:Record<string,unknown>;ip_address:string|null;created_at:string};
+export const getAuditLogs=(token:string,page=1)=>API.get<{items:AuditLog[];total:number;page:number;pages:number}>("/api/traceability/audit",{headers:authHeaders(token),params:{page}}).then(r=>r.data);
 
 export const getDiseaseChart = (days = 7) =>
     API.get("/api/stats/chart/disease", { params: { days } }).then((r) => r.data);
@@ -132,10 +167,11 @@ export const setLight = (device_id: string, light_on: boolean) =>
 export const captureFromCamera = (model_name = "best_11") =>
     API.post("/api/stream/capture", null, { params: { model_name, device_id: "web-camera" } }).then((r) => r.data);
 
-export const uploadPredict = async (file: File, model_name = "best_11") => {
+export const uploadPredict = async (file: File, model_name = "best_11", trace_code?: string) => {
     const form = new FormData();
     form.append("file", file);
     form.append("model_name", model_name);
+    if (trace_code) form.append("trace_code", trace_code);
     const r = await API.post<Prediction>("/api/predict", form);
     return r.data;
 };
