@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     JWT_PUBLIC_KEY: Optional[str] = None
 
     # CORS Configuration
-    CORS_ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    CORS_ALLOWED_ORIGINS: str = "*"
 
     # Celery Configuration
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
@@ -60,10 +60,29 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        return [origin.strip() for origin in self.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+        val = os.getenv("CORS_ORIGINS") or os.getenv("CORS_ALLOWED_ORIGINS") or self.CORS_ALLOWED_ORIGINS
+        return [origin.strip() for origin in val.split(",") if origin.strip()]
+
+    def _ensure_rsa_keys(self):
+        if not self.JWT_PRIVATE_KEY or not self.JWT_PUBLIC_KEY:
+            try:
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                from cryptography.hazmat.primitives import serialization
+                key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                self.JWT_PRIVATE_KEY = key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                ).decode("utf-8")
+                self.JWT_PUBLIC_KEY = key.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode("utf-8")
+            except Exception as e:
+                pass
 
     def get_private_key(self) -> str:
-        """Resolve RSA private key from environment variable or file."""
+        """Resolve RSA private key from environment variable, file, or generated."""
         if self.JWT_PRIVATE_KEY:
             return self.JWT_PRIVATE_KEY
         
@@ -76,11 +95,14 @@ class Settings(BaseSettings):
             if path and os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     return f.read()
-                    
-        raise ValueError("RSA Private Key not found! Provide JWT_PRIVATE_KEY or valid JWT_PRIVATE_KEY_PATH.")
+        
+        self._ensure_rsa_keys()
+        if self.JWT_PRIVATE_KEY:
+            return self.JWT_PRIVATE_KEY
+        raise ValueError("RSA Private Key could not be resolved or generated.")
 
     def get_public_key(self) -> str:
-        """Resolve RSA public key from environment variable or file."""
+        """Resolve RSA public key from environment variable, file, or generated."""
         if self.JWT_PUBLIC_KEY:
             return self.JWT_PUBLIC_KEY
             
@@ -94,6 +116,9 @@ class Settings(BaseSettings):
                 with open(path, "r", encoding="utf-8") as f:
                     return f.read()
                     
-        raise ValueError("RSA Public Key not found! Provide JWT_PUBLIC_KEY or valid JWT_PUBLIC_KEY_PATH.")
+        self._ensure_rsa_keys()
+        if self.JWT_PUBLIC_KEY:
+            return self.JWT_PUBLIC_KEY
+        raise ValueError("RSA Public Key could not be resolved or generated.")
 
 settings = Settings()

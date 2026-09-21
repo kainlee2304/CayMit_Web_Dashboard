@@ -38,7 +38,16 @@ import app.modules.outbox.models
 SQLITE_DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "tammysmartfruit.db"))
 SQLITE_ASYNC_URL = f"sqlite+aiosqlite:///{SQLITE_DB_PATH.replace(os.sep, '/')}"
 
-_active_db_url = settings.DATABASE_URL
+def normalize_async_db_url(url: str) -> str:
+    if not url or "sqlite" in url:
+        return url
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgresql://") and not url.startswith("postgresql+"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+_active_db_url = normalize_async_db_url(os.getenv("DATABASE_URL", settings.DATABASE_URL))
 _is_sqlite = False
 
 def create_app_engine(db_url: str) -> AsyncEngine:
