@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "D:\\Project\\CayMit_Web_Dashboard\\backend\\datasets",
+  "weights_dir": "weights",
+  "runs_dir": "runs",
+  "uuid": "7b290bd789541d28d4cd93dc238fd19136dd93ced7760ac61f5a1130bffd4e49",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}

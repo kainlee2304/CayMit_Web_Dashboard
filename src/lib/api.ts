@@ -5,13 +5,168 @@ const API = axios.create({
         (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000"),
 });
 
+let isRefreshing = false;
+let refreshSubscribers: Array<{ resolve: (token: string) => void; reject: (err: any) => void }> = [];
+
+function subscribeTokenRefresh(resolve: (token: string) => void, reject: (err: any) => void) {
+    refreshSubscribers.push({ resolve, reject });
+}
+
+function onRefreshed(token: string) {
+    refreshSubscribers.forEach((cb) => cb.resolve(token));
+    refreshSubscribers = [];
+}
+
+function onRefreshError(error: any) {
+    refreshSubscribers.forEach((cb) => cb.reject(error));
+    refreshSubscribers = [];
+}
+
+const UUID_REGEX = /^[0-9a-fA-F-]{36}$/;
+
 API.interceptors.request.use((config) => {
     if (typeof window !== "undefined") {
         const token = localStorage.getItem("caymit_access_token") || localStorage.getItem("trace_token");
-        if (token && !config.headers.Authorization) config.headers.Authorization = `Bearer ${token}`;
+        if (token && (!config.headers.Authorization || config.headers.Authorization === "Bearer ")) {
+            config.headers.Authorization = `Bearer ${token}`;
+        }
+        const orgId = localStorage.getItem("tammy_organization_id");
+        if (orgId && UUID_REGEX.test(orgId) && !config.headers["X-Organization-ID"]) {
+            config.headers["X-Organization-ID"] = orgId;
+        }
     }
+
+    if (config.headers) {
+        const keysToRemove: string[] = [];
+        const devHeaderLog: Record<string, string> = {};
+
+        for (const [key, val] of Object.entries(config.headers)) {
+            const strVal = String(val ?? "");
+            if (/[^\x00-\x7F]/.test(strVal)) {
+                if (process.env.NODE_ENV !== "production") {
+                    console.warn(`[Header Sanitizer] Stripped invalid non-ASCII header '${key}': "${strVal}"`);
+                }
+                keysToRemove.push(key);
+                continue;
+            }
+
+            if (process.env.NODE_ENV !== "production") {
+                if (key.toLowerCase() === "authorization") {
+                    devHeaderLog[key] = "(typeof: string, value: [REDACTED_BEARER_TOKEN])";
+                } else {
+                    devHeaderLog[key] = `(typeof: ${typeof val}, value: "${strVal}")`;
+                }
+            }
+        }
+
+        for (const key of keysToRemove) {
+            delete config.headers[key];
+        }
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[API Request] ${config.method?.toUpperCase()} ${config.url}`, devHeaderLog);
+        }
+    }
+
     return config;
 });
+
+API.interceptors.response.use(
+    (response) => response,
+    async (error) => {
+        const originalRequest = error.config;
+        if (!originalRequest) return Promise.reject(error);
+
+        // Development logger for non-2xx API errors
+        if (process.env.NODE_ENV !== "production" && error.response) {
+            console.warn(`[API ${error.response.status}] ${originalRequest.method?.toUpperCase()} ${originalRequest.url}`, {
+                status: error.response.status,
+                data: error.response.data,
+            });
+        }
+
+        // 401 Unauthorized -> Handle single-flight refresh
+        if (error.response?.status === 401) {
+            const isAuthEndpoint =
+                originalRequest.url?.includes("/auth/login") ||
+                originalRequest.url?.includes("/auth/refresh");
+
+            if (originalRequest._retry || isAuthEndpoint) {
+                return Promise.reject(error);
+            }
+
+            if (isRefreshing) {
+                return new Promise((resolve, reject) => {
+                    subscribeTokenRefresh(
+                        (token: string) => {
+                            originalRequest.headers.Authorization = `Bearer ${token}`;
+                            resolve(API(originalRequest));
+                        },
+                        (err: any) => reject(err)
+                    );
+                });
+            }
+
+            originalRequest._retry = true;
+            isRefreshing = true;
+
+            const storedRefreshToken =
+                typeof window !== "undefined"
+                    ? localStorage.getItem("caymit_refresh_token") || localStorage.getItem("trace_refresh_token")
+                    : null;
+
+            if (!storedRefreshToken) {
+                isRefreshing = false;
+                if (typeof window !== "undefined") {
+                    localStorage.removeItem("caymit_access_token");
+                    localStorage.removeItem("caymit_refresh_token");
+                    localStorage.removeItem("trace_token");
+                    if (!window.location.pathname.startsWith("/login")) {
+                        window.location.href = "/login";
+                    }
+                }
+                return Promise.reject(error);
+            }
+
+            try {
+                const baseURL = process.env.NEXT_PUBLIC_API_URL || (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000");
+                const res = await axios.post(`${baseURL}/api/v1/auth/refresh`, {
+                    refresh_token: storedRefreshToken
+                });
+
+                const newAccessToken = res.data.access_token;
+                const newRefreshToken = res.data.refresh_token;
+
+                if (typeof window !== "undefined") {
+                    localStorage.setItem("caymit_access_token", newAccessToken);
+                    localStorage.setItem("trace_token", newAccessToken);
+                    if (newRefreshToken) {
+                        localStorage.setItem("caymit_refresh_token", newRefreshToken);
+                    }
+                }
+
+                onRefreshed(newAccessToken);
+                originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+                return API(originalRequest);
+            } catch (refreshErr) {
+                onRefreshError(refreshErr);
+                if (typeof window !== "undefined") {
+                    localStorage.removeItem("caymit_access_token");
+                    localStorage.removeItem("caymit_refresh_token");
+                    localStorage.removeItem("trace_token");
+                    if (!window.location.pathname.startsWith("/login")) {
+                        window.location.href = "/login";
+                    }
+                }
+                return Promise.reject(refreshErr);
+            } finally {
+                isRefreshing = false;
+            }
+        }
+
+        return Promise.reject(error);
+    }
+);
 
 export type Prediction = {
     id: number;
@@ -88,11 +243,38 @@ export type TraceBatch = {
 };
 export type TraceBatchPage = { items:TraceBatch[]; total:number; page:number; page_size:number; pages:number };
 
-export type TraceRole = "admin" | "producer" | "processor" | "logistics";
-export type TraceUser = { id:number; username:string; display_name:string; organization:string; role:TraceRole; active:boolean; approved:boolean; created_at:string; last_login_at:string|null };
-export type TraceAuth = { access_token:string; token_type:"bearer"; user:TraceUser };
+export type TraceRole =
+    | "admin_hq"
+    | "farmer"
+    | "technician"
+    | "packhouse_lead"
+    | "qa_qc"
+    | "logistics"
+    | "admin"
+    | "producer"
+    | "processor";
 
-const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}` });
+export type TraceUser = {
+    id: string | number;
+    username: string;
+    display_name: string;
+    organization: string;
+    organization_id?: string;
+    role: TraceRole;
+    roles?: string[];
+    permissions?: string[];
+    data_scope?: string;
+    active: boolean;
+    approved: boolean;
+    created_at: string;
+    last_login_at: string | null;
+};
+export type TraceAuth = { access_token:string; refresh_token?:string; token_type:"bearer"; user:TraceUser };
+
+const authHeaders = (token?: string) => {
+    const activeToken = (token && token.trim()) || (typeof window !== "undefined" ? localStorage.getItem("caymit_access_token") || localStorage.getItem("trace_token") : "");
+    return activeToken ? { Authorization: `Bearer ${activeToken}` } : {};
+};
 
 // API helpers
 export const getPredictions = (params?: Record<string, string | number>) =>
@@ -116,20 +298,107 @@ export const getTraceBatch = (code: string) =>
 export const getTraceBatches = (token: string, params?:{page?:number;page_size?:number;search?:string;batch_status?:string}) =>
     API.get<TraceBatchPage>("/api/traceability/batches", {headers:authHeaders(token),params}).then((r) => r.data);
 
-export const getTraceAuthStatus = () =>
-    API.get<{initialized:boolean}>("/api/traceability/auth/status").then((r) => r.data);
+export const getTraceAuthStatus = async () => {
+    try {
+        return await API.get<{initialized:boolean}>("/api/traceability/auth/status").then((r) => r.data);
+    } catch {
+        return { initialized: true };
+    }
+};
 
 export const bootstrapTraceAdmin = (payload: {username:string;password:string;display_name:string;organization:string}) =>
     API.post<TraceAuth>("/api/traceability/auth/bootstrap", payload).then((r) => r.data);
 
-export const loginTrace = (payload: {username:string;password:string}) =>
-    API.post<TraceAuth>("/api/traceability/auth/login", payload).then((r) => r.data);
+export const loginTrace = async (payload: {username:string;password:string}): Promise<TraceAuth> => {
+    const res = await API.post("/api/v1/auth/login", {
+        username_or_email: payload.username,
+        password: payload.password
+    });
+    const data = res.data;
+    
+    if (typeof window !== "undefined") {
+        localStorage.setItem("caymit_access_token", data.access_token);
+        localStorage.setItem("trace_token", data.access_token);
+        if (data.refresh_token) {
+            localStorage.setItem("caymit_refresh_token", data.refresh_token);
+        }
+        if (data.organization_id) {
+            localStorage.setItem("tammy_organization_id", data.organization_id);
+        }
+    }
 
-export const registerTrace = (payload: {username:string;password:string;display_name:string;organization:string;role:Exclude<TraceRole,"admin">}) =>
+    const meRes = await API.get("/api/v1/auth/me", {
+        headers: { Authorization: `Bearer ${data.access_token}` }
+    });
+    const me = meRes.data;
+
+    let role: TraceRole = "farmer";
+    if (me.roles?.includes("admin_hq") || me.roles?.includes("admin")) role = "admin_hq";
+    else if (me.roles?.includes("technician")) role = "technician";
+    else if (me.roles?.includes("farmer") || me.roles?.includes("producer")) role = "farmer";
+    else if (me.roles?.includes("packhouse_lead") || me.roles?.includes("processor")) role = "packhouse_lead";
+    else if (me.roles?.includes("qa_qc")) role = "qa_qc";
+    else if (me.roles?.includes("logistics")) role = "logistics";
+    else if (me.roles?.[0]) role = me.roles[0] as TraceRole;
+
+    const traceUser: TraceUser = {
+        id: me.id,
+        username: me.username,
+        display_name: me.full_name || me.username,
+        organization: me.active_organization?.org_name || "HTX Tam Mỹ",
+        organization_id: me.active_organization?.id,
+        role,
+        roles: me.roles || [role],
+        permissions: me.permissions || [],
+        data_scope: me.data_scope || "OWN",
+        active: me.is_active,
+        approved: true,
+        created_at: new Date().toISOString(),
+        last_login_at: new Date().toISOString()
+    };
+
+    return {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        token_type: "bearer",
+        user: traceUser
+    };
+};
+
+export const registerTrace = (payload: {username:string;password:string;display_name:string;organization:string;role:Exclude<TraceRole,"admin"|"admin_hq">}) =>
     API.post<{message:string;user:TraceUser}>("/api/traceability/auth/register", payload).then((r) => r.data);
 
-export const getTraceMe = (token: string) =>
-    API.get<TraceUser>("/api/traceability/auth/me", {headers:authHeaders(token)}).then((r) => r.data);
+export const getTraceMe = async (token: string): Promise<TraceUser> => {
+    const meRes = await API.get("/api/v1/auth/me", {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+    const me = meRes.data;
+
+    let role: TraceRole = "farmer";
+    if (me.roles?.includes("admin_hq") || me.roles?.includes("admin")) role = "admin_hq";
+    else if (me.roles?.includes("technician")) role = "technician";
+    else if (me.roles?.includes("farmer") || me.roles?.includes("producer")) role = "farmer";
+    else if (me.roles?.includes("packhouse_lead") || me.roles?.includes("processor")) role = "packhouse_lead";
+    else if (me.roles?.includes("qa_qc")) role = "qa_qc";
+    else if (me.roles?.includes("logistics")) role = "logistics";
+    else if (me.roles?.[0]) role = me.roles[0] as TraceRole;
+
+    return {
+        id: me.id,
+        username: me.username,
+        display_name: me.full_name || me.username,
+        organization: me.active_organization?.org_name || "HTX Tam Mỹ",
+        organization_id: me.active_organization?.id,
+        role,
+        roles: me.roles || [role],
+        permissions: me.permissions || [],
+        data_scope: me.data_scope || "OWN",
+        active: me.is_active,
+        approved: true,
+        created_at: new Date().toISOString(),
+        last_login_at: new Date().toISOString()
+    };
+};
 
 export const createTraceBatch = (token: string, payload: {product_name:string;variety?:string;farm_name:string;origin:string;harvest_date?:string;plot_code?:string;quantity?:number;unit?:string}) =>
     API.post<TraceBatch>("/api/traceability/batches", payload, {headers:authHeaders(token)}).then((r) => r.data);
@@ -191,6 +460,28 @@ export const CLASS_LABELS: Record<string, string> = {
     fruit_borer: "Sâu Đục Trái",
     fruit_rot: "Thối Trái",
     anthracnose: "Thán Thư Trái",
+};
+
+export const CLASS_LABELS_EN: Record<string, string> = {
+    not_jackfruit: "No jackfruit or tree detected",
+    pink_disease: "Pink Disease (Corticium)",
+    stem_cracking_gummosis: "Stem Cracking Gummosis",
+    batocera_rufomaculata: "Stem Borer (Batocera)",
+    stripe_canker: "Stripe Canker",
+    Binh_thuong: "✅ Healthy",
+    Healthy: "✅ Healthy Fruit",
+    healthy: "✅ Healthy Fruit",
+    normal: "✅ Healthy Fruit",
+    "Sau_duc_trai(BactroceraSpp)": "Fruit Borer",
+    "ThoiTrai(Rhizopus_stolonifer)": "Fruit Rot (Rhizopus)",
+    fruit_borer: "Fruit Borer",
+    fruit_rot: "Fruit Rot",
+    anthracnose: "Anthracnose",
+};
+
+export const getClassLabel = (cls: string, lang = "vi") => {
+    if (lang === "en") return CLASS_LABELS_EN[cls] || CLASS_LABELS[cls] || cls;
+    return CLASS_LABELS[cls] || cls;
 };
 
 export const CLASS_COLORS: Record<string, string> = {
@@ -389,4 +680,500 @@ DISEASE_TREATMENTS.normal = DISEASE_TREATMENTS.Binh_thuong;
 DISEASE_TREATMENTS.Healthy = DISEASE_TREATMENTS.Binh_thuong;
 DISEASE_TREATMENTS["Sau_duc_trai(BactroceraSpp)"] = DISEASE_TREATMENTS.fruit_borer;
 DISEASE_TREATMENTS["ThoiTrai(Rhizopus_stolonifer)"] = DISEASE_TREATMENTS.fruit_rot;
+
+// ==========================================
+// Phase 5 Agricultural Core API & Types
+// ==========================================
+
+export interface GeoJSONGeometry {
+    type: "Polygon" | "MultiPolygon" | "Point";
+    coordinates: any;
+}
+
+export interface CropVariety {
+    id: string;
+    crop_code: string;
+    variety_code: string;
+    name: string;
+    description?: string;
+    scientific_name?: string;
+    origin_country?: string;
+    is_active: boolean;
+}
+
+export interface Crop {
+    id: string;
+    crop_code: string;
+    name: string;
+    scientific_name?: string;
+    varieties?: CropVariety[];
+}
+
+export interface FarmerProfile {
+    id: string;
+    user_id: string;
+    username: string;
+    full_name: string;
+    phone_number: string;
+    email?: string;
+    organization_id: string;
+    created_at: string;
+}
+
+export interface GrowingArea {
+    id: string;
+    organization_id: string;
+    area_code: string;
+    area_name: string;
+    puc_registration_code?: string;
+    puc_issued_at?: string;
+    puc_expires_at?: string;
+    puc_status: string;
+    province_code: string;
+    district_code: string;
+    commune_code: string;
+    total_area_hectares: number;
+    boundary_polygon?: GeoJSONGeometry;
+    created_at: string;
+}
+
+export interface Farm {
+    id: string;
+    organization_id: string;
+    growing_area_id: string;
+    farm_code: string;
+    farm_name: string;
+    owner_farmer_user_id: string;
+    owner_name?: string;
+    address_line?: string;
+    farm_area_hectares: number;
+    plot_count?: number;
+    created_at: string;
+}
+
+export interface TreeGroup {
+    id: string;
+    crop_variety_code: string;
+    variety_name?: string;
+    planting_year: number;
+    tree_count: number;
+}
+
+export interface ClaimStatusHistory {
+    id: string;
+    previous_status: string;
+    new_status: string;
+    previous_assurance_level: string;
+    new_assurance_level: string;
+    transition_reason?: string;
+    transitioned_by: string;
+    transitioned_by_name?: string;
+    occurred_at: string;
+}
+
+export interface EvidenceRecord {
+    id: string;
+    evidence_type: string;
+    evidence_hash: string;
+    captured_at: string;
+    metadata_json?: Record<string, any>;
+    created_at: string;
+}
+
+export interface DataClaim {
+    id: string;
+    organization_id: string;
+    claim_type: string;
+    subject_type: string;
+    subject_id: string;
+    value_code: string;
+    value_json?: Record<string, any>;
+    declared_by: string;
+    declared_by_name?: string;
+    declared_at: string;
+    source_type: string;
+    assurance_level: string;
+    verification_status: string;
+    verified_by?: string;
+    verified_by_name?: string;
+    verified_at?: string;
+    verification_method?: string;
+    risk_score: number;
+    is_current: boolean;
+    created_at: string;
+    status_history?: ClaimStatusHistory[];
+    evidence_records?: EvidenceRecord[];
+}
+
+export interface Plot {
+    id: string;
+    farm_id: string;
+    farm_name?: string;
+    plot_code: string;
+    plot_name: string;
+    boundary_polygon?: GeoJSONGeometry;
+    geodesic_area_hectares?: number;
+    soil_type?: string;
+    irrigation_system?: string;
+    current_variety_claim?: DataClaim;
+    tree_groups: TreeGroup[];
+    created_at: string;
+}
+
+export interface GlobalSearchResult {
+    query: string;
+    total_matches: number;
+    farmers: Array<{ id: string; username: string; full_name: string; phone_number: string }>;
+    growing_areas: Array<{ id: string; area_code: string; area_name: string; puc_status: string }>;
+    farms: Array<{ id: string; farm_code: string; farm_name: string; owner_name?: string }>;
+    plots: Array<{ id: string; plot_code: string; plot_name: string; farm_name?: string }>;
+}
+
+// Master Data APIs
+export const getMasterCrops = (lang = "vi") =>
+    API.get<Crop[]>(`/api/v1/master-data/crops?lang=${lang}`).then((r) => r.data);
+
+export const getMasterVarieties = (cropCode = "JACKFRUIT", lang = "vi") =>
+    API.get<CropVariety[]>(`/api/v1/master-data/varieties?crop_code=${cropCode}&lang=${lang}`).then((r) => r.data);
+
+// Farmers APIs
+export const getFarmers = () =>
+    API.get<FarmerProfile[]>("/api/v1/farmers").then((r) => r.data);
+
+export const getFarmerById = (id: string) =>
+    API.get<FarmerProfile>(`/api/v1/farmers/${id}`).then((r) => r.data);
+
+export const createFarmer = (data: {
+    organization_id: string;
+    username: string;
+    full_name_vi: string;
+    phone_number: string;
+    email?: string;
+    password?: string;
+}) => API.post<FarmerProfile>("/api/v1/farmers", data).then((r) => r.data);
+
+// Growing Areas APIs
+export const getGrowingAreas = () =>
+    API.get<GrowingArea[]>("/api/v1/growing-areas").then((r) => r.data);
+
+export const getGrowingAreaById = (id: string) =>
+    API.get<GrowingArea>(`/api/v1/growing-areas/${id}`).then((r) => r.data);
+
+export const createGrowingArea = (data: {
+    organization_id: string;
+    area_code: string;
+    area_name: string;
+    puc_registration_code?: string;
+    puc_issued_at?: string;
+    puc_expires_at?: string;
+    puc_status?: string;
+    province_code: string;
+    district_code: string;
+    commune_code: string;
+    boundary_polygon: GeoJSONGeometry;
+}) => API.post<GrowingArea>("/api/v1/growing-areas", data).then((r) => r.data);
+
+export const updateGrowingAreaStatus = (id: string, status: string, notes?: string) =>
+    API.patch<GrowingArea>(`/api/v1/growing-areas/${id}/status`, { puc_status: status, notes }).then((r) => r.data);
+
+// Farms APIs
+export const getFarms = () =>
+    API.get<Farm[]>("/api/v1/farms").then((r) => r.data);
+
+export const getFarmById = (id: string) =>
+    API.get<Farm>(`/api/v1/farms/${id}`).then((r) => r.data);
+
+export const createFarm = (data: {
+    organization_id: string;
+    growing_area_id: string;
+    farm_code: string;
+    farm_name: string;
+    owner_farmer_user_id: string;
+    address_line?: string;
+    farm_area_hectares: number;
+}) => API.post<Farm>("/api/v1/farms", data).then((r) => r.data);
+
+// Plots APIs
+export const getPlots = (farmId?: string) =>
+    API.get<Plot[]>("/api/v1/plots", { params: farmId ? { farm_id: farmId } : {} }).then((r) => r.data);
+
+export const getPlotById = (id: string) =>
+    API.get<Plot>(`/api/v1/plots/${id}`).then((r) => r.data);
+
+export const createPlot = (data: {
+    farm_id: string;
+    plot_code: string;
+    plot_name: string;
+    boundary_polygon: GeoJSONGeometry;
+    soil_type?: string;
+    irrigation_system?: string;
+    tree_groups?: Array<{
+        crop_variety_code: string;
+        planting_year: number;
+        tree_count: number;
+    }>;
+}) => API.post<Plot>("/api/v1/plots", data).then((r) => r.data);
+
+// Claims APIs
+export const getClaims = (params?: { subject_id?: string; claim_type?: string; is_current?: boolean }) =>
+    API.get<DataClaim[]>("/api/v1/claims", { params }).then((r) => r.data);
+
+export const getClaimById = (id: string) =>
+    API.get<DataClaim>(`/api/v1/claims/${id}`).then((r) => r.data);
+
+export const declareClaim = (data: {
+    organization_id: string;
+    claim_type: string;
+    subject_type: string;
+    subject_id: string;
+    value_code: string;
+    evidence_notes?: string;
+    gps_latitude?: number;
+    gps_longitude?: number;
+}) => API.post<DataClaim>("/api/v1/claims", data).then((r) => r.data);
+
+export const verifyClaim = (claimId: string, data: {
+    decision: "VERIFY" | "REJECT";
+    verification_method?: string;
+    notes?: string;
+}) => API.post<DataClaim>(`/api/v1/claims/${claimId}/verify`, data).then((r) => r.data);
+
+// Global Search API
+export const globalSearch = (query: string) =>
+    API.get<GlobalSearchResult>(`/api/v1/search?q=${encodeURIComponent(query)}`).then((r) => r.data);
+
+// ==========================================
+// Phase 6 Season & Farm Diary API & Types
+// ==========================================
+
+export interface YieldEstimate {
+    id: string;
+    estimation_method: string;
+    estimated_yield_kg: number;
+    confidence_level_pct: number;
+    estimated_by_name?: string;
+    notes?: string;
+    created_at: string;
+}
+
+export interface ActivityType {
+    id: string;
+    activity_code: string;
+    name_vi: string;
+    name_en: string;
+    name?: string;
+    instructions_vi?: string;
+    instructions_en?: string;
+    instructions?: string;
+    requires_material: boolean;
+    requires_gps_photo: boolean;
+    is_active: boolean;
+}
+
+export interface MaterialType {
+    id: string;
+    type_code: string;
+    is_quarantine_restricted: boolean;
+    is_organic_allowed: boolean;
+    is_active: boolean;
+}
+
+export interface Material {
+    id: string;
+    organization_id: string;
+    material_type_id: string;
+    material_type_code?: string;
+    material_code: string;
+    brand_name: string;
+    manufacturer?: string;
+    active_ingredient?: string;
+    active_ingredient_concentration?: string;
+    pre_harvest_interval_days: number;
+    standard_dosage_per_ha?: string;
+    is_organic_certified: boolean;
+    is_active: boolean;
+    batches_count?: number;
+    total_remaining_stock?: number;
+}
+
+export interface MaterialBatch {
+    id: string;
+    material_id: string;
+    material_name?: string;
+    material_code?: string;
+    pre_harvest_interval_days?: number;
+    batch_number: string;
+    manufacturing_date: string;
+    expiration_date: string;
+    initial_quantity: number;
+    remaining_quantity: number;
+    unit_id: string;
+    unit_code: string;
+    unit_name?: string;
+    storage_location?: string;
+    is_active: boolean;
+}
+
+export interface MaterialUsage {
+    id: string;
+    activity_id: string;
+    material_batch_id: string;
+    material_name?: string;
+    material_code?: string;
+    batch_number?: string;
+    quantity_applied: number;
+    unit_code?: string;
+    unit_name?: string;
+    phi_days_applied: number;
+    earliest_safe_harvest_date?: string;
+    application_method?: string;
+}
+
+export interface FarmActivity {
+    id: string;
+    season_id: string;
+    season_name?: string;
+    season_code?: string;
+    plot_id?: string;
+    plot_name?: string;
+    activity_type_id: string;
+    activity_type_code?: string;
+    activity_name_vi?: string;
+    activity_name_en?: string;
+    activity_name?: string;
+    activity_code: string;
+    performed_by_user_id: string;
+    performed_by_name?: string;
+    performed_at: string;
+    gps_point?: GeoJSONGeometry;
+    gps_accuracy_meters?: number;
+    is_geofence_verified: boolean;
+    duration_hours?: number;
+    weather_condition?: string;
+    notes?: string;
+    verification_status: string;
+    assurance_level: string;
+    verified_by_user_id?: string;
+    verified_by_name?: string;
+    verified_at?: string;
+    verification_method?: string;
+    verification_notes?: string;
+    created_at: string;
+    updated_at: string;
+    materials: MaterialUsage[];
+    evidence_records?: EvidenceRecord[];
+}
+
+export interface CropSeason {
+    id: string;
+    plot_id: string;
+    plot_name?: string;
+    farm_name?: string;
+    organization_id?: string;
+    season_code: string;
+    season_name: string;
+    start_date: string;
+    expected_harvest_start: string;
+    expected_harvest_end: string;
+    actual_harvest_end?: string;
+    forecasted_yield_kg: number;
+    actual_harvested_yield_kg: number;
+    season_status: "DRAFT" | "ACTIVE" | "HARVESTING" | "CLOSED" | "CANCELLED";
+    closed_at?: string;
+    inherited_variety_code?: string;
+    inherited_variety_name_vi?: string;
+    inherited_variety_name_en?: string;
+    inherited_variety_name?: string;
+    is_variety_verified?: boolean;
+    variety_assurance_level?: string;
+    activities_count?: number;
+    materials_used_count?: number;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface SeasonDetail extends CropSeason {
+    yield_estimates: YieldEstimate[];
+    farm_activities: FarmActivity[];
+    materials_summary: {
+        total_applications: number;
+        earliest_safe_harvest_date?: string;
+        is_safe_to_harvest: boolean;
+        longest_phi_material?: string;
+        longest_phi_days?: number;
+    };
+}
+
+// Master Activity Types API
+export const getMasterActivityTypes = (lang = "vi") =>
+    API.get<ActivityType[]>(`/api/v1/master-data/activity-types?lang=${lang}`).then((r) => r.data);
+
+// Materials APIs
+export const getMaterials = (materialTypeCode?: string) =>
+    API.get<Material[]>("/api/v1/materials", { params: materialTypeCode ? { material_type_code: materialTypeCode } : {} }).then((r) => r.data);
+
+export const getMaterialBatches = (materialId?: string) =>
+    API.get<MaterialBatch[]>("/api/v1/materials/batches", { params: materialId ? { material_id: materialId } : {} }).then((r) => r.data);
+
+export const createMaterialBatch = (data: {
+    material_id: string;
+    batch_number: string;
+    manufacturing_date: string;
+    expiration_date: string;
+    initial_quantity: number;
+    unit_id: string;
+    storage_location?: string;
+}) => API.post<MaterialBatch>("/api/v1/materials/batches", data).then((r) => r.data);
+
+// Seasons APIs
+export const getSeasons = (params?: { plot_id?: string; season_status?: string }) =>
+    API.get<CropSeason[]>("/api/v1/seasons", { params }).then((r) => r.data);
+
+export const getSeasonById = (id: string) =>
+    API.get<SeasonDetail>(`/api/v1/seasons/${id}`).then((r) => r.data);
+
+export const createSeason = (data: {
+    plot_id: string;
+    season_name: string;
+    start_date: string;
+    expected_harvest_start: string;
+    expected_harvest_end: string;
+    forecasted_yield_kg: number;
+}) => API.post<CropSeason>("/api/v1/seasons", data).then((r) => r.data);
+
+export const closeSeason = (id: string, notes?: string) =>
+    API.post<CropSeason>(`/api/v1/seasons/${id}/close`, { notes }).then((r) => r.data);
+
+// Farm Activities / Diary APIs
+export const getFarmActivities = (params?: { season_id?: string; plot_id?: string; verification_status?: string }) =>
+    API.get<FarmActivity[]>("/api/v1/farm-activities", { params }).then((r) => r.data);
+
+export const getFarmActivityById = (id: string) =>
+    API.get<FarmActivity>(`/api/v1/farm-activities/${id}`).then((r) => r.data);
+
+export const createFarmActivity = (data: {
+    season_id: string;
+    activity_type_id: string;
+    performed_at: string;
+    gps_point?: GeoJSONGeometry;
+    gps_accuracy_meters?: number;
+    duration_hours?: number;
+    weather_condition?: string;
+    notes?: string;
+    materials?: Array<{
+        material_batch_id: string;
+        quantity_applied: number;
+        unit_id: string;
+        application_method?: string;
+    }>;
+    evidence_photo_base64?: string;
+}) => API.post<FarmActivity>("/api/v1/farm-activities", data).then((r) => r.data);
+
+export const verifyFarmActivity = (id: string, data: {
+    decision: "APPROVED" | "REJECTED";
+    verification_method?: string;
+    notes?: string;
+}) => API.post<FarmActivity>(`/api/v1/farm-activities/${id}/verify`, data).then((r) => r.data);
+
+
 

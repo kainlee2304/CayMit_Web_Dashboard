@@ -13,8 +13,13 @@ from dotenv import load_dotenv
 from PIL import Image, ImageChops, ImageStat
 from torchvision import models, transforms
 
-os.environ.setdefault("YOLO_CONFIG_DIR", str(Path(__file__).parent.parent / ".ultralytics"))
+yolo_config_path = Path(__file__).parent.parent / ".ultralytics"
+yolo_config_path.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("YOLO_CONFIG_DIR", str(yolo_config_path))
+os.environ.setdefault("YOLO_OFFLINE", "1")
 os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 from ultralytics import YOLO
 
 try:
@@ -106,73 +111,104 @@ class ModelService:
         else:
             print("[ModelService] Roboflow fruit detector disabled: missing ROBOFLOW_API_KEY")
 
+    def _resolve_path(self, raw_path: Optional[str], default_rel: str) -> Optional[Path]:
+        if raw_path:
+            p = Path(raw_path)
+            if p.exists():
+                return p
+            # Try resolving relative to BASE_DIR
+            p_base = (BASE_DIR / raw_path).resolve()
+            if p_base.exists():
+                return p_base
+            # Try stripping relative prefixes
+            clean_name = p.name
+            p_model = BASE_DIR / "models" / clean_name
+            if p_model.exists():
+                return p_model
+
+        default_p = (BASE_DIR / "models" / default_rel).resolve()
+        if default_p.exists():
+            return default_p
+        return None
+
     def _load_models(self):
-        yolo_model_paths = {
-            "best_11": os.getenv("MODEL_PATH_11", str(BASE_DIR / "models" / "best_11.pt")),
-            "best_26": os.getenv("MODEL_PATH_26", str(BASE_DIR / "models" / "best_26.pt")),
-            "jackfruit_yolov26m_cls": os.getenv("JACKFRUIT_YOLO_MODEL_PATH", str(BASE_DIR / "models" / "best.pt")),
+        yolo_candidates = {
+            "best_11": (os.getenv("MODEL_PATH_11"), "best_11.pt"),
+            "best_26": (os.getenv("MODEL_PATH_26"), "best_26.pt"),
+            "jackfruit_yolov26m_cls": (os.getenv("JACKFRUIT_YOLO_MODEL_PATH"), "best.pt"),
         }
         optional_detectors = {
-            "stem_branch_detector": os.getenv("MODEL_PATH_STEM_DET"),
-            "jackfruit_detector": os.getenv("MODEL_PATH_FRUIT_DET"),
+            "stem_branch_detector": (os.getenv("MODEL_PATH_STEM_DET"), "stem_det.pt"),
+            "jackfruit_detector": (os.getenv("MODEL_PATH_FRUIT_DET"), "fruit_det.pt"),
         }
-        yolo_model_paths.update({name: path for name, path in optional_detectors.items() if path})
 
-        for name, path in yolo_model_paths.items():
-            if Path(path).exists():
-                print(f"[ModelService] Loading YOLO model: {name} from {path}")
-                model = YOLO(path)
+        for name, (raw_path, def_name) in yolo_candidates.items():
+            resolved = self._resolve_path(raw_path, def_name)
+            if resolved and resolved.exists():
+                print(f"[ModelService] Loading YOLO model: {name} from {resolved}")
+                model = YOLO(str(resolved))
                 self.models[name] = model
                 self.model_types[name] = "yolo_detect" if model.task == "detect" else "yolo_cls"
                 self.class_names[name] = list(model.names.values())
                 print(f"[ModelService] OK: {name} loaded")
             else:
-                print(f"[ModelService] Model not found: {path}")
+                print(f"[ModelService] Model not found: {raw_path or def_name}")
 
-        efficientnet_path = os.getenv(
-            "JACKFRUIT_EFFICIENTNET_MODEL_PATH",
-            str(BASE_DIR / "models" / "best_jackfruit_model.pth"),
+        for name, (raw_path, def_name) in optional_detectors.items():
+            if raw_path:
+                resolved = self._resolve_path(raw_path, def_name)
+                if resolved and resolved.exists():
+                    model = YOLO(str(resolved))
+                    self.models[name] = model
+                    self.model_types[name] = "yolo_detect" if model.task == "detect" else "yolo_cls"
+                    self.class_names[name] = list(model.names.values())
+                    print(f"[ModelService] OK: {name} loaded")
+
+        eff_resolved = self._resolve_path(
+            os.getenv("JACKFRUIT_EFFICIENTNET_MODEL_PATH"), "best_jackfruit_model.pth"
         )
-        if Path(efficientnet_path).exists():
+        if eff_resolved and eff_resolved.exists():
             try:
-                print(f"[ModelService] Loading EfficientNet-B0 model from {efficientnet_path}")
-                self._load_efficientnet("jackfruit_efficientnet_b0", efficientnet_path)
+                print(f"[ModelService] Loading EfficientNet-B0 model from {eff_resolved}")
+                self._load_efficientnet("jackfruit_efficientnet_b0", str(eff_resolved))
                 print("[ModelService] OK: jackfruit_efficientnet_b0 loaded")
             except Exception as exc:
-                print(f"[ModelService] Cannot load EfficientNet-B0 model {efficientnet_path}: {exc}")
+                print(f"[ModelService] Cannot load EfficientNet-B0 model {eff_resolved}: {exc}")
         else:
-            print(f"[ModelService] Model not found: {efficientnet_path}")
+            print(f"[ModelService] Model not found: best_jackfruit_model.pth")
 
-        general_guard_path = os.getenv(
-            "GENERAL_OBJECT_MODEL_PATH", str(BASE_DIR / "models" / "yolo11n_general.pt")
+        gen_guard_resolved = self._resolve_path(
+            os.getenv("GENERAL_OBJECT_MODEL_PATH"), "yolo11n_general.pt"
         )
-        if Path(general_guard_path).exists():
-            self.general_object_guard = YOLO(general_guard_path)
+        if gen_guard_resolved and gen_guard_resolved.exists():
+            self.general_object_guard = YOLO(str(gen_guard_resolved))
             print("[ModelService] OK: general object guard loaded")
 
-        imagenet_guard_path = os.getenv(
-            "IMAGENET_GUARD_MODEL_PATH", str(BASE_DIR / "models" / "efficientnet_b0_imagenet.pth")
+        img_guard_resolved = self._resolve_path(
+            os.getenv("IMAGENET_GUARD_MODEL_PATH"), "efficientnet_b0_imagenet.pth"
         )
-        if Path(imagenet_guard_path).exists():
+        if img_guard_resolved and img_guard_resolved.exists():
             self.imagenet_guard = models.efficientnet_b0(weights=None)
-            state_dict = torch.load(imagenet_guard_path, map_location=self.device, weights_only=True)
+            state_dict = torch.load(str(img_guard_resolved), map_location=self.device, weights_only=True)
             self.imagenet_guard.load_state_dict(state_dict)
             self.imagenet_guard.to(self.device).eval()
             print("[ModelService] OK: ImageNet jackfruit guard loaded")
 
-        fruit_identity_path = os.getenv(
-            "FRUIT_IDENTITY_MODEL_PATH", str(BASE_DIR / "models" / "fruit_100_vit")
+        fruit_id_resolved = self._resolve_path(
+            os.getenv("FRUIT_IDENTITY_MODEL_PATH"), "fruit_100_vit"
         )
         if (
-            AutoImageProcessor is not None
+            fruit_id_resolved
+            and fruit_id_resolved.exists()
+            and AutoImageProcessor is not None
             and AutoModelForImageClassification is not None
-            and Path(fruit_identity_path, "model.safetensors").exists()
+            and (fruit_id_resolved / "model.safetensors").exists()
         ):
             self.fruit_identity_processor = AutoImageProcessor.from_pretrained(
-                fruit_identity_path, local_files_only=True, use_fast=True
+                str(fruit_id_resolved), local_files_only=True, use_fast=True
             )
             self.fruit_identity_model = AutoModelForImageClassification.from_pretrained(
-                fruit_identity_path, local_files_only=True
+                str(fruit_id_resolved), local_files_only=True
             ).to(self.device).eval()
             print("[ModelService] OK: ViT 100-fruit identity guard loaded")
 

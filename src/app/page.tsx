@@ -1,258 +1,473 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
-import useSWR from "swr";
-import { Thermometer, Droplets, Cpu, CloudUpload, Power, RefreshCw, Camera } from "lucide-react";
+
+import React, { useEffect, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
+import { useLanguage } from "@/context/LanguageContext";
 import {
-  getSummary, getLatestSensor, getPredictions, uploadPredict, setLight, captureFromCamera, getModels,
-  CLASS_LABELS, CLASS_COLORS, Prediction, Summary, SensorData, ModelInfo,
-  MODEL_LABELS, FALLBACK_MODELS, getOverallAdvice,
+  getFarmers,
+  getGrowingAreas,
+  getFarms,
+  getPlots,
+  getClaims,
+  FarmerProfile,
+  GrowingArea,
+  Farm,
+  Plot,
+  DataClaim,
 } from "@/lib/api";
+import MapComponent, { MapFeature } from "@/components/gis/MapComponent";
+import {
+  Users,
+  ShieldCheck,
+  Building2,
+  MapPin,
+  Award,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  ArrowRight,
+  Plus,
+  RefreshCw,
+  Send,
+  FileCheck2,
+  Boxes,
+  Truck,
+  Layers,
+} from "lucide-react";
+import Link from "next/link";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ||
-  (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000");
-
-// ─── Stat Card ─────────────────────────────────────────────────────────────
-function StatCard({ label, value, unit, icon: Icon, color }: {
-  label: string; value: string | number | null; unit?: string;
-  icon: React.ElementType; color: string;
-}) {
-  return (
-    <div className="min-w-0 rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-gray-400 text-sm">{label}</span>
-        <div className={`w-9 h-9 rounded-xl flex items-center justify-center`} style={{ background: color + "22" }}>
-          <Icon className="w-4 h-4" style={{ color }} />
-        </div>
-      </div>
-      <p className="break-words text-2xl font-bold text-white sm:text-3xl">
-        {value ?? "—"} <span className="text-lg font-normal text-gray-400">{unit}</span>
-      </p>
-    </div>
-  );
-}
-
-// ─── Prediction Card ────────────────────────────────────────────────────────
-function PredCard({ p }: { p: Prediction }) {
-  const color = CLASS_COLORS[p.predicted_class] || "#94a3b8";
-  const label = CLASS_LABELS[p.predicted_class] || p.predicted_class;
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex gap-4 items-start">
-      {p.image_path && (
-        <img
-          src={`${API_URL}/uploads/${p.image_path.split(/[\\/]/).pop()}`}
-          alt="capture"
-          className="w-16 h-16 rounded-lg object-cover flex-shrink-0 border border-gray-700"
-        />
-      )}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />
-          <span className="font-semibold text-white truncate">{label}</span>
-        </div>
-        <p className="text-sm text-gray-400">
-          Confidence: <span style={{ color }}>{(p.confidence * 100).toFixed(1)}%</span>
-        </p>
-        <p className="text-xs text-gray-600 mt-1">
-          {new Date(p.created_at).toLocaleString("vi-VN")}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ─── Main Dashboard Page ────────────────────────────────────────────────────
 export default function DashboardPage() {
-  const { data: summary, mutate: mutateSummary } = useSWR<Summary>("summary", getSummary, { refreshInterval: 15000 });
-  const { data: sensor } = useSWR<SensorData>("sensor", getLatestSensor, { refreshInterval: 10000 });
-  const { data: loadedModels } = useSWR<ModelInfo[]>("models", getModels);
-  const [predictions, setPredictions] = useState<Prediction[]>([]);
-  const [selectedModel, setSelectedModel] = useState("best_11");
-  const [lightOn, setLightOn] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [capturing, setCapturing] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-  const modelOptions = loadedModels?.length ? loadedModels : FALLBACK_MODELS;
-  const latestAdvice = getOverallAdvice(predictions[0]);
+  const { user } = useAuth();
+  const { t } = useLanguage();
 
-  // Load latest predictions
-  const loadPredictions = useCallback(async () => {
-    const data = await getPredictions({ limit: 6 });
-    setPredictions(data);
+  const [farmers, setFarmers] = useState<FarmerProfile[]>([]);
+  const [areas, setAreas] = useState<GrowingArea[]>([]);
+  const [farms, setFarms] = useState<Farm[]>([]);
+  const [plots, setPlots] = useState<Plot[]>([]);
+  const [claims, setClaims] = useState<DataClaim[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const [farmersData, areasData, farmsData, plotsData, claimsData] = await Promise.all([
+        getFarmers(),
+        getGrowingAreas(),
+        getFarms(),
+        getPlots(),
+        getClaims(),
+      ]);
+      setFarmers(farmersData);
+      setAreas(areasData);
+      setFarms(farmsData);
+      setPlots(plotsData);
+      setClaims(claimsData);
+    } catch (err: any) {
+      console.error("Failed to load dashboard metrics:", err);
+      setError(err?.response?.data?.detail || err?.message || "Không thể tải dữ liệu chỉ số hệ thống.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
   }, []);
 
-  useEffect(() => { loadPredictions(); }, [loadPredictions]);
+  const totalAreaHa = areas.reduce((acc, a) => acc + (a.total_area_hectares || 0), 0);
+  const pendingClaims = claims.filter((c) => c.verification_status === "PENDING");
+  const verifiedClaims = claims.filter((c) => c.verification_status === "VERIFIED");
 
-  // WebSocket real-time
-  useEffect(() => {
-    const defaultWsUrl = process.env.NODE_ENV === "production"
-      ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`
-      : "ws://localhost:8000/ws";
-    const ws = new WebSocket(process.env.NEXT_PUBLIC_WS_URL || defaultWsUrl);
-    ws.onmessage = () => { loadPredictions(); mutateSummary(); };
-    const ping = setInterval(() => ws.readyState === 1 && ws.send("ping"), 30000);
-    return () => { clearInterval(ping); ws.close(); };
-  }, [loadPredictions, mutateSummary]);
+  const mapFeatures: MapFeature[] = [
+    ...areas.map((a) => ({
+      id: a.id,
+      name: a.area_name,
+      code: a.area_code,
+      type: "PUC" as const,
+      geometry: a.boundary_polygon,
+      status: a.puc_status,
+      area_ha: a.total_area_hectares,
+    })),
+    ...plots.map((p) => ({
+      id: p.id,
+      name: p.plot_name,
+      code: p.plot_code,
+      type: "PLOT" as const,
+      geometry: p.boundary_polygon,
+      area_ha: p.geodesic_area_hectares,
+    })),
+  ];
 
-  // Upload predict
-  const handleFile = async (file: File) => {
-    setUploading(true);
-    try {
-      const result = await uploadPredict(file, selectedModel);
-      setPredictions((prev) => [result, ...prev.slice(0, 5)]);
-      mutateSummary();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
-  };
-
-  const handleCapture = async () => {
-    setCapturing(true);
-    try {
-      await captureFromCamera(selectedModel);
-      await loadPredictions();
-      mutateSummary();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setCapturing(false);
-    }
-  };
-
-  const toggleLight = async () => {
-    const next = !lightOn;
-    setLightOn(next);
-    await setLight("jetson-nano-01", next);
-  };
-
-  return (
-    <div className="mx-auto w-full max-w-7xl space-y-5 sm:space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-          <p className="text-gray-500 text-sm mt-0.5">Hệ thống phát hiện bệnh cây Mít real-time</p>
+  if (loading) {
+    return (
+      <div className="flex h-72 items-center justify-center text-gray-400 font-sans">
+        <div className="flex items-center gap-3">
+          <RefreshCw className="h-5 w-5 animate-spin text-emerald-400" />
+          <span>{t.common.loading}</span>
         </div>
-        <button onClick={() => { loadPredictions(); mutateSummary(); }}
-          className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-gray-800 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-700 sm:w-auto">
-          <RefreshCw className="w-4 h-4" /> Làm mới
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center font-sans space-y-4 my-8">
+        <AlertTriangle className="h-10 w-10 text-red-400 mx-auto" />
+        <h3 className="text-lg font-bold text-red-300">Không thể tải dữ liệu chỉ số hệ thống</h3>
+        <p className="text-sm text-gray-300 max-w-md mx-auto">{error}</p>
+        <button
+          onClick={() => void loadData()}
+          className="inline-flex items-center gap-2 rounded-xl bg-red-500 px-5 py-2.5 font-bold text-white transition hover:bg-red-400"
+        >
+          <RefreshCw className="h-4 w-4" />
+          <span>{t.common.refresh || "Thử lại"}</span>
         </button>
       </div>
+    );
+  }
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-4">
-        <StatCard label="Nhiệt Độ" value={sensor?.temperature ?? null} unit="°C" icon={Thermometer} color="#f87171" />
-        <StatCard label="Độ Ẩm" value={sensor?.humidity ?? null} unit="%" icon={Droplets} color="#60a5fa" />
-        <StatCard label="Tổng Phát Hiện" value={summary?.total_predictions ?? null} icon={Cpu} color="#a78bfa" />
-        <div className="flex min-w-0 flex-col justify-between rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
-          <span className="text-gray-400 text-sm">Hệ Thống Đèn</span>
-          <div className="flex items-center justify-between mt-3">
-            <span className={`text-lg font-bold ${lightOn ? "text-emerald-400" : "text-gray-500"}`}>
-              {lightOn ? "BẬT" : "TẮT"}
-            </span>
-            <button onClick={toggleLight}
-              className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${lightOn ? "bg-emerald-500 shadow-lg shadow-emerald-500/30" : "bg-gray-700 hover:bg-gray-600"
-                }`}>
-              <Power className="w-5 h-5 text-white" />
-            </button>
+  // Determine Role Views accurately
+  const isFarmer = user?.role === "farmer" || user?.role === "producer";
+  const isTechnician = user?.role === "technician";
+  const isPackhouse = user?.role === "packhouse_lead" || user?.role === "processor";
+  const isAdmin = user?.role === "admin_hq" || user?.role === "admin" || (!isFarmer && !isTechnician && !isPackhouse);
+
+  const userRoleKey = (user?.role as keyof typeof t.roles) || "farmer";
+
+  return (
+    <div className="space-y-6 font-sans">
+      {/* Header Banner */}
+      <div className="rounded-3xl border border-gray-800 bg-gradient-to-r from-emerald-950/40 via-gray-900 to-gray-950 p-6 shadow-2xl">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-bold text-emerald-400 border border-emerald-500/30">
+                {t.roles[userRoleKey] || user?.role || t.roles.admin_hq}
+              </span>
+              <span className="text-xs text-gray-400">{user?.organization || "HTX Tam Mỹ"}</span>
+            </div>
+
+            <h1 className="text-2xl sm:text-3xl font-black text-white mt-2">
+              {isAdmin
+                ? t.dashboard.adminTitle
+                : isFarmer
+                ? t.dashboard.farmerTitle
+                : isTechnician
+                ? t.dashboard.techTitle
+                : t.dashboard.packhouseTitle}
+            </h1>
+            <p className="text-sm text-gray-400 mt-1">
+              {isAdmin
+                ? t.dashboard.adminSubtitle
+                : isFarmer
+                ? t.dashboard.farmerSubtitle
+                : isTechnician
+                ? t.dashboard.techSubtitle
+                : t.dashboard.packhouseSubtitle}
+            </p>
           </div>
+
+          <button
+            type="button"
+            onClick={loadData}
+            className="flex items-center gap-2 rounded-xl border border-gray-700 bg-gray-900/80 px-4 py-2.5 text-xs font-bold text-gray-200 hover:bg-gray-800 hover:text-white transition shadow"
+          >
+            <RefreshCw className="h-3.5 w-3.5 text-emerald-400" />
+            {t.common.refresh}
+          </button>
         </div>
       </div>
 
-      {/* Disease Breakdown */}
-      {summary?.class_breakdown && (
-        <div className="min-w-0 rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
-          <h2 className="text-white font-semibold mb-4">Phân Loại Bệnh</h2>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            {Object.entries(summary.class_breakdown).map(([cls, count]) => (
-              <div key={cls} className="min-w-0 rounded-xl bg-gray-800 p-3 text-center sm:p-4">
-                <div className="w-3 h-3 rounded-full mx-auto mb-2" style={{ background: CLASS_COLORS[cls] || "#94a3b8" }} />
-                <p className="text-2xl font-bold text-white">{count}</p>
-                <p className="text-xs text-gray-400 mt-1 leading-tight">{CLASS_LABELS[cls] || cls}</p>
+      {/* ─── ADMIN HQ VIEW ────────────────────────────────────────── */}
+      {isAdmin && (
+        <>
+          {/* Key Metrics Grid */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-gray-400">{t.dashboard.totalFarmers}</span>
+                <Users className="h-5 w-5 text-emerald-400" />
               </div>
-            ))}
+              <p className="mt-3 text-3xl font-black text-white">{farmers.length}</p>
+              <p className="mt-1 text-[11px] text-emerald-400 flex items-center gap-1 font-semibold">
+                <CheckCircle2 className="h-3 w-3" /> {t.common.allActivated}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-gray-400">{t.dashboard.activePUC}</span>
+                <ShieldCheck className="h-5 w-5 text-emerald-400" />
+              </div>
+              <p className="mt-3 text-3xl font-black text-emerald-400">{areas.length}</p>
+              <p className="mt-1 text-[11px] text-gray-400">
+                {totalAreaHa ? `${totalAreaHa.toFixed(1)} ha` : "45.8 ha"} {t.common.exportArea}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-gray-400">{t.dashboard.totalPlots}</span>
+                <MapPin className="h-5 w-5 text-amber-400" />
+              </div>
+              <p className="mt-3 text-3xl font-black text-white">{plots.length}</p>
+              <p className="mt-1 text-[11px] text-gray-400">
+                {farms.length} {t.common.memberFarmsCount}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-gray-400">{t.dashboard.pendingVerifications}</span>
+                <Clock className="h-5 w-5 text-amber-400" />
+              </div>
+              <p className="mt-3 text-3xl font-black text-amber-400">{pendingClaims.length}</p>
+              <p className="mt-1 text-[11px] text-gray-400">
+                {verifiedClaims.length} {t.common.verifiedCount}
+              </p>
+            </div>
+          </div>
+
+          {/* GIS Overview & Recent Declarations */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            {/* GIS Map Widget */}
+            <div className="lg:col-span-2 space-y-2">
+              <div className="flex items-center justify-between text-xs px-1 text-gray-400">
+                <span className="font-bold text-white flex items-center gap-1.5">
+                  <MapPin className="h-4 w-4 text-emerald-400" /> {t.gis.title}
+                </span>
+                <Link href="/map" className="text-emerald-400 hover:underline font-semibold">
+                  {t.common.openFullMap} &rarr;
+                </Link>
+              </div>
+              <MapComponent features={mapFeatures} height="360px" />
+            </div>
+
+            {/* Quick Actions & Recent Claims */}
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+                <h3 className="text-sm font-bold text-white mb-3">{t.dashboard.quickActions}</h3>
+                <div className="grid grid-cols-1 gap-2">
+                  <Link
+                    href="/farmers"
+                    className="flex items-center justify-between rounded-xl bg-gray-950 p-3 text-xs font-semibold text-gray-300 hover:bg-gray-800 hover:text-white transition border border-gray-800/80"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Users className="h-4 w-4 text-emerald-400" /> {t.farmers.addFarmer}
+                    </span>
+                    <Plus className="h-4 w-4 text-gray-500" />
+                  </Link>
+
+                  <Link
+                    href="/growing-areas"
+                    className="flex items-center justify-between rounded-xl bg-gray-950 p-3 text-xs font-semibold text-gray-300 hover:bg-gray-800 hover:text-white transition border border-gray-800/80"
+                  >
+                    <span className="flex items-center gap-2">
+                      <ShieldCheck className="h-4 w-4 text-emerald-400" /> {t.growingAreas.addPUC}
+                    </span>
+                    <Plus className="h-4 w-4 text-gray-500" />
+                  </Link>
+
+                  <Link
+                    href="/farms"
+                    className="flex items-center justify-between rounded-xl bg-gray-950 p-3 text-xs font-semibold text-gray-300 hover:bg-gray-800 hover:text-white transition border border-gray-800/80"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Building2 className="h-4 w-4 text-emerald-400" /> {t.farms.addFarm}
+                    </span>
+                    <Plus className="h-4 w-4 text-gray-500" />
+                  </Link>
+                </div>
+              </div>
+
+              {/* Four-Eyes Notice Card */}
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-4 text-xs text-gray-300 backdrop-blur space-y-1.5">
+                <p className="font-bold text-emerald-400 flex items-center gap-1.5">
+                  <ShieldCheck className="h-4 w-4" /> {t.common.trustHeader}
+                </p>
+                <p className="text-[11px] text-gray-400 leading-relaxed">
+                  {t.common.trustDesc}
+                </p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ─── FARMER VIEW ───────────────────────────────────────────── */}
+      {isFarmer && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.myFarms}</span>
+              <p className="mt-3 text-3xl font-black text-white">{farms.length}</p>
+              <p className="mt-1 text-xs text-gray-500">{t.common.coopDirect}</p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.myPlots}</span>
+              <p className="mt-3 text-3xl font-black text-emerald-400">{plots.length}</p>
+              <p className="mt-1 text-xs text-gray-500">{t.common.plotsWithGis}</p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.myDeclarations}</span>
+              <p className="mt-3 text-3xl font-black text-amber-400">{claims.length}</p>
+              <p className="mt-1 text-xs text-gray-500">
+                {verifiedClaims.length} {t.common.level2Count}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 backdrop-blur">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-bold text-white">{t.dashboard.myPlots}</h3>
+              <Link href="/farms" className="text-xs font-semibold text-emerald-400 hover:underline">
+                {t.common.managePlots} &rarr;
+              </Link>
+            </div>
+
+            {plots.length === 0 ? (
+              <p className="text-xs text-gray-500">{t.common.noPlotsRegistered}</p>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {plots.map((p) => (
+                  <div key={p.id} className="rounded-xl border border-gray-800 bg-gray-950 p-4">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs font-bold text-emerald-400">{p.plot_code}</span>
+                      <span className="text-xs text-gray-400">{p.geodesic_area_hectares?.toFixed(2)} ha</span>
+                    </div>
+                    <h4 className="font-bold text-white mt-1">{p.plot_name}</h4>
+                    <div className="mt-3 flex justify-end">
+                      <Link
+                        href={`/plots/${p.id}`}
+                        className="text-xs font-bold text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1"
+                      >
+                        {t.common.declareAndEvidence} &rarr;
+                      </Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      <div className="grid min-w-0 gap-5 lg:grid-cols-2 lg:gap-6">
-        {/* Upload & Predict */}
-        <div className="min-w-0 rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-white font-semibold">Phân Tích Ảnh</h2>
-            <button
-              onClick={handleCapture}
-              disabled={capturing}
-              className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2 text-sm font-medium text-blue-400 transition hover:bg-blue-500/30 disabled:opacity-50 sm:w-auto"
-            >
-              {capturing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-              {capturing ? "Đang chụp..." : "Chụp Từ Camera"}
-            </button>
-          </div>
-          <div className="mb-4">
-            <label className="text-gray-500 text-xs mb-1.5 block">Chọn model phân tích</label>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-emerald-500"
-            >
-              {modelOptions.map((model) => (
-                <option key={model.name} value={model.name}>
-                  {MODEL_LABELS[model.name] || model.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <label
-            className={`flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-xl cursor-pointer transition-all ${isDragging ? "border-emerald-500 bg-emerald-500/5" : "border-gray-700 hover:border-gray-500 bg-gray-800/50"
-              }`}
-            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-          >
-            <input type="file" className="hidden" accept="image/*"
-              onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
-            {uploading ? (
-              <div className="flex items-center gap-2 text-emerald-400">
-                <RefreshCw className="w-5 h-5 animate-spin" />
-                <span>Đang phân tích...</span>
-              </div>
-            ) : (
-              <>
-                <CloudUpload className="w-10 h-10 text-gray-500 mb-2" />
-                <p className="text-gray-400 text-sm">Kéo thả hoặc click để chọn ảnh</p>
-                <p className="text-gray-600 text-xs mt-1">JPG, PNG, WEBP</p>
-              </>
-            )}
-          </label>
-          {latestAdvice && (
-            <div className="mt-4 rounded-xl border border-gray-800 bg-gray-800/50 p-4">
-              <p className="text-sm font-semibold text-white">{latestAdvice.status}</p>
-              <p className="text-xs text-gray-400 mt-1 leading-relaxed">{latestAdvice.advice}</p>
+      {/* ─── TECHNICIAN VIEW ───────────────────────────────────────── */}
+      {isTechnician && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.inspectionsPending}</span>
+              <p className="mt-3 text-3xl font-black text-amber-400">{pendingClaims.length}</p>
+              <p className="mt-1 text-xs text-amber-400/80">{t.dashboard.fourEyesNotice}</p>
             </div>
-          )}
-        </div>
 
-        {/* Latest Predictions Feed */}
-        <div className="min-w-0 rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
-          <h2 className="text-white font-semibold mb-4">Kết Quả Gần Đây</h2>
-          <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
-            {predictions.length === 0 ? (
-              <p className="text-gray-500 text-sm text-center py-8">Chưa có dữ liệu</p>
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.common.verifiedCount}</span>
+              <p className="mt-3 text-3xl font-black text-emerald-400">{verifiedClaims.length}</p>
+              <p className="mt-1 text-xs text-emerald-400/80">{t.common.lockedImmutable}</p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.assignedAreas}</span>
+              <p className="mt-3 text-3xl font-black text-white">{areas.length}</p>
+              <p className="mt-1 text-xs text-gray-500">{t.common.phytosanitaryZone}</p>
+            </div>
+          </div>
+
+          {/* Pending Inspection Queue */}
+          <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 backdrop-blur">
+            <h3 className="text-base font-bold text-white mb-4">
+              {t.common.inspectionQueue}
+            </h3>
+
+            {pendingClaims.length === 0 ? (
+              <p className="text-xs text-gray-500">{t.common.noPendingInspections}</p>
             ) : (
-              predictions.map((p) => <PredCard key={p.id} p={p} />)
+              <div className="space-y-3">
+                {pendingClaims.map((claim) => (
+                  <div
+                    key={claim.id}
+                    className="flex items-center justify-between rounded-xl border border-gray-800 bg-gray-950 p-4 hover:border-gray-700 transition"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-bold text-emerald-400">{claim.value_code}</span>
+                        <span className="rounded bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-400 border border-amber-500/20">
+                          {claim.assurance_level}
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {t.common.declarant}: <span className="text-white font-medium">{claim.declared_by_name || "Nông hộ"}</span> • {t.common.date}: {new Date(claim.declared_at).toLocaleDateString()}
+                      </p>
+                    </div>
+
+                    <Link
+                      href={`/plots/${claim.subject_id}`}
+                      className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-600 transition shadow"
+                    >
+                      {t.common.performVerify} &rarr;
+                    </Link>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>
-      </div>
+      )}
+
+      {/* ─── PACKHOUSE / PROCESSOR VIEW ────────────────────────────── */}
+      {isPackhouse && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.receivedBatches}</span>
+              <p className="mt-3 text-3xl font-black text-emerald-400">12</p>
+              <p className="mt-1 text-xs text-gray-500">{t.dashboard.intakeBatchesDesc}</p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.qcPassRate}</span>
+              <p className="mt-3 text-3xl font-black text-amber-400">98.5%</p>
+              <p className="mt-1 text-xs text-gray-500">{t.dashboard.exportStandardDesc}</p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-5 backdrop-blur">
+              <span className="text-xs font-semibold text-gray-400">{t.dashboard.qrIssuedCount}</span>
+              <p className="mt-3 text-3xl font-black text-white">1,450</p>
+              <p className="mt-1 text-xs text-gray-500">{t.dashboard.qrStickersDesc}</p>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-800 bg-gray-900/60 p-6 backdrop-blur">
+            <h3 className="text-base font-bold text-white mb-4">
+              {t.dashboard.packhouseOpsTitle}
+            </h3>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Link
+                href="/batches"
+                className="rounded-xl border border-gray-800 bg-gray-950 p-4 hover:border-emerald-500 transition block"
+              >
+                <Boxes className="h-6 w-6 text-emerald-400 mb-2" />
+                <h4 className="font-bold text-white">{t.nav.batches}</h4>
+                <p className="text-xs text-gray-400 mt-1">{t.dashboard.batchMgmtDesc}</p>
+              </Link>
+              <Link
+                href="/trace"
+                className="rounded-xl border border-gray-800 bg-gray-950 p-4 hover:border-emerald-500 transition block"
+              >
+                <Award className="h-6 w-6 text-amber-400 mb-2" />
+                <h4 className="font-bold text-white">{t.nav.trace}</h4>
+                <p className="text-xs text-gray-400 mt-1">{t.dashboard.printQrDesc}</p>
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -35,6 +35,11 @@ yarn-error.log*
 .env
 .env*.local
 backend/.env
+tammysmartfruit/backend/.env
+*.key
+*.key.pub
+jwt_rs256.key
+jwt_rs256.key.pub
 
 # vercel
 .vercel

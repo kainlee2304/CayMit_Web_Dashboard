@@ -1,9 +1,11 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import useSWR from "swr";
-import { Eye, EyeOff, Camera, Timer, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
+import { Eye, EyeOff, Camera, Timer, CheckCircle, AlertCircle, RefreshCw, Video, VideoOff } from "lucide-react";
 import { useCapture } from "@/context/CaptureContext";
+import { useLanguage } from "@/context/LanguageContext";
 import { CLASS_LABELS, CLASS_COLORS, FALLBACK_MODELS, MODEL_LABELS, ModelInfo, getModels, getOverallAdvice } from "@/lib/api";
+import { formatSafeDate } from "@/lib/utils";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ||
     (process.env.NODE_ENV === "production" ? "" : "http://localhost:8000");
@@ -15,12 +17,35 @@ export default function LivePage() {
         intervalMin, setIntervalMin,
         capturing, countdown, lastResult, doCapture,
     } = useCapture();
+    const { t, language } = useLanguage();
 
     const { data: loadedModels } = useSWR<ModelInfo[]>("models", getModels);
+    const [cameraActive, setCameraActive] = useState(true);
     const [aiMode, setAiMode] = useState(false);
     const [streamKey, setStreamKey] = useState(0);
     const modelOptions = loadedModels?.length ? loadedModels : FALLBACK_MODELS;
     const advice = getOverallAdvice(lastResult);
+
+    const toggleCamera = useCallback(async () => {
+        if (cameraActive) {
+            setCameraActive(false);
+            try {
+                await fetch(`${API_URL}/api/stream/stop`, { method: "POST" });
+            } catch {
+                // ignore
+            }
+        } else {
+            setCameraActive(true);
+            setStreamKey((k) => k + 1);
+        }
+    }, [cameraActive]);
+
+    // Cleanup camera stream hardware on unmount
+    useEffect(() => {
+        return () => {
+            fetch(`${API_URL}/api/stream/stop`, { method: "POST" }).catch(() => {});
+        };
+    }, []);
 
     const streamUrl = aiMode
         ? `${API_URL}/api/stream/camera/ai?model_name=${encodeURIComponent(selectedModel)}`
@@ -28,34 +53,59 @@ export default function LivePage() {
 
     const cls = lastResult?.predicted_class;
     const color = cls ? CLASS_COLORS[cls] || "#94a3b8" : "#94a3b8";
-    const label = cls ? CLASS_LABELS[cls] || cls : "";
-    const isHealthy = cls === "Binh_thuong";
+    
+    let displayLabel = "";
+    if (cls === "not_jackfruit") {
+        displayLabel = t.live.noFruitDetected;
+    } else if (cls === "Binh_thuong" || cls === "healthy") {
+        displayLabel = t.live.healthy;
+    } else if (cls) {
+        displayLabel = CLASS_LABELS[cls] || cls;
+    }
+
+    const isHealthy = cls === "Binh_thuong" || cls === "healthy";
     const mm = String(Math.floor(countdown / 60)).padStart(2, "0");
     const ss = String(countdown % 60).padStart(2, "0");
 
     return (
-        <div className="mx-auto w-full max-w-5xl space-y-5">
+        <div className="mx-auto w-full max-w-5xl space-y-5 font-sans">
             <div>
-                <h1 className="text-2xl font-bold text-white">Camera Live</h1>
-                <p className="text-gray-500 text-sm mt-0.5">Xem camera + tự động phân tích bệnh định kỳ</p>
+                <h1 className="text-2xl font-bold text-white">{t.live.title}</h1>
+                <p className="text-gray-500 text-sm mt-0.5">{t.live.subtitle}</p>
             </div>
 
             {/* ── Controls ──────────────────────────────────────────── */}
             <div className="grid grid-cols-1 gap-3 sm:flex sm:flex-wrap sm:items-center">
+                {/* Camera Power Toggle */}
                 <button
-                    onClick={() => setStreamKey((k) => k + 1)}
-                    className="flex min-h-11 items-center justify-center gap-2 rounded-xl bg-gray-800 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-700"
+                    onClick={toggleCamera}
+                    className={`flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+                        cameraActive
+                            ? "bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/30"
+                            : "bg-gray-800 border border-gray-700 text-gray-400 hover:bg-gray-700"
+                    }`}
                 >
-                    <RefreshCw className="w-4 h-4" /> Kết nối lại
+                    {cameraActive ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+                    {cameraActive ? t.live.cameraOn : t.live.cameraOff}
                 </button>
+
+                {cameraActive && (
+                    <button
+                        onClick={() => setStreamKey((k) => k + 1)}
+                        className="flex min-h-11 items-center justify-center gap-2 rounded-xl bg-gray-800 px-4 py-2 text-sm text-gray-300 transition hover:bg-gray-700"
+                    >
+                        <RefreshCw className="w-4 h-4" /> {t.live.reconnect}
+                    </button>
+                )}
 
                 <button
                     onClick={() => { setAiMode((v) => !v); setStreamKey((k) => k + 1); }}
-                    className={`flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${aiMode ? "bg-violet-500/20 border border-violet-500/40 text-violet-400" : "bg-gray-800 border border-gray-700 text-gray-400"
-                        }`}
+                    className={`flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition ${
+                        aiMode ? "bg-violet-500/20 border border-violet-500/40 text-violet-400" : "bg-gray-800 border border-gray-700 text-gray-400"
+                    }`}
                 >
                     {aiMode ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                    Overlay AI: {aiMode ? "BẬT" : "TẮT"}
+                    {aiMode ? t.live.overlayAiOn : t.live.overlayAiOff}
                 </button>
 
                 <button
@@ -64,7 +114,7 @@ export default function LivePage() {
                     className="flex min-h-11 items-center justify-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2 text-sm font-medium text-blue-400 transition hover:bg-blue-500/30 disabled:opacity-50"
                 >
                     <Camera className="w-4 h-4" />
-                    {capturing ? "Đang chụp..." : "Chụp Ngay"}
+                    {capturing ? t.live.capturing : t.live.captureNow}
                 </button>
 
                 <select
@@ -88,26 +138,33 @@ export default function LivePage() {
                         onChange={(e) => setIntervalMin(Math.max(1, parseInt(e.target.value) || 1))}
                         className="w-12 bg-transparent text-white text-sm text-center outline-none"
                     />
-                    <span className="text-gray-400 text-sm">phút</span>
+                    <span className="text-gray-400 text-sm">{t.live.minutes}</span>
                 </div>
 
                 {/* Auto toggle */}
                 <button
                     onClick={() => setAutoCapture(!autoCapture)}
-                    className={`flex min-h-11 items-center justify-center gap-2 rounded-xl px-5 py-2 text-sm font-medium transition-all ${autoCapture
+                    className={`flex min-h-11 items-center justify-center gap-2 rounded-xl px-5 py-2 text-sm font-medium transition-all ${
+                        autoCapture
                             ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/30"
                             : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-                        }`}
+                    }`}
                 >
-                    <div className={`w-2 h-2 rounded-full ${autoCapture ? "bg-white animate-pulse" : "bg-gray-600"}`} />
-                    Tự động: {autoCapture ? "BẬT" : "TẮT"}
+                    <span className={`w-2 h-2 rounded-full ${autoCapture ? "bg-white animate-ping" : "bg-gray-500"}`} />
+                    {autoCapture ? t.live.autoModeOn : t.live.autoModeOff}
                 </button>
             </div>
 
-            {/* ── Countdown bar ─────────────────────────────────────── */}
+            {/* ── Auto-capture countdown bar ───────────────────────── */}
             {autoCapture && (
-                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-800 bg-gray-900 px-4 py-3 sm:gap-4 sm:px-5">
-                    <span className="text-gray-400 text-sm">Chụp tiếp theo sau:</span>
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5">
+                    <div className="flex items-center gap-2 text-xs text-emerald-300">
+                        <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                        </span>
+                        {t.live.nextCaptureIn}:
+                    </div>
                     <span className="text-emerald-400 font-mono font-bold text-lg">{mm}:{ss}</span>
                     <div className="order-last h-1.5 w-full overflow-hidden rounded-full bg-gray-800 sm:order-none sm:w-auto sm:flex-1">
                         <div
@@ -115,7 +172,7 @@ export default function LivePage() {
                             style={{ width: `${(1 - countdown / (intervalMin * 60)) * 100}%` }}
                         />
                     </div>
-                    <span className="text-xs text-gray-600">🔁 Chạy xuyên trang</span>
+                    <span className="text-xs text-gray-500">🔁 {t.live.crossPageSync}</span>
                 </div>
             )}
 
@@ -123,13 +180,29 @@ export default function LivePage() {
                 {/* ── Stream ─────────────────────────────────────────── */}
                 <div className="min-w-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 lg:col-span-2">
                     <div className="relative bg-black" style={{ aspectRatio: "16/9" }}>
-                        <img key={streamKey} src={streamUrl} alt="camera" className="w-full h-full object-contain" />
-                        <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur px-3 py-1.5 rounded-full">
-                            <div className={`w-2 h-2 rounded-full animate-pulse ${aiMode ? "bg-violet-400" : "bg-emerald-400"}`} />
-                            <span className={`text-xs font-medium ${aiMode ? "text-violet-300" : "text-emerald-300"}`}>
-                                {aiMode ? "AI Detection" : "Live"}
-                            </span>
-                        </div>
+                        {cameraActive ? (
+                            <>
+                                <img key={streamKey} src={streamUrl} alt="camera" className="w-full h-full object-contain" />
+                                <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur px-3 py-1.5 rounded-full">
+                                    <div className={`w-2 h-2 rounded-full animate-pulse ${aiMode ? "bg-violet-400" : "bg-emerald-400"}`} />
+                                    <span className={`text-xs font-medium ${aiMode ? "text-violet-300" : "text-emerald-300"}`}>
+                                        {aiMode ? "AI Detection" : "Live"}
+                                    </span>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center text-gray-500">
+                                <VideoOff className="h-14 w-14 opacity-30 text-gray-400" />
+                                <p className="text-base font-semibold text-gray-300">{t.live.cameraStreamOff}</p>
+                                <p className="text-xs text-gray-500 max-w-xs">{t.live.cameraStreamOffDesc}</p>
+                                <button
+                                    onClick={() => setCameraActive(true)}
+                                    className="mt-2 flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-md hover:bg-emerald-500 transition"
+                                >
+                                    <Video className="w-4 h-4" /> {t.live.turnCameraOn}
+                                </button>
+                            </div>
+                        )}
                         {capturing && (
                             <div className="absolute inset-0 border-4 border-white/40 animate-pulse pointer-events-none" />
                         )}
@@ -139,13 +212,13 @@ export default function LivePage() {
                 {/* ── Result ─────────────────────────────────────────── */}
                 <div className="flex min-w-0 flex-col rounded-2xl border border-gray-800 bg-gray-900 p-4 sm:p-5">
                     <h2 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <Camera className="w-4 h-4 text-gray-400" /> Kết Quả
+                        <Camera className="w-4 h-4 text-gray-400" /> {t.live.resultTitle}
                     </h2>
 
                     {!lastResult ? (
                         <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-sm gap-2">
                             <Camera className="w-10 h-10 opacity-30" />
-                            Chưa chụp ảnh nào
+                            {t.live.noCaptureYet}
                         </div>
                     ) : (
                         <div className="space-y-4 flex-1">
@@ -166,9 +239,9 @@ export default function LivePage() {
                                         ? <CheckCircle className="w-8 h-8 text-emerald-400" />
                                         : <AlertCircle className="w-8 h-8" style={{ color }} />}
                                 </div>
-                                <p className="font-bold text-white text-base">{label}</p>
+                                <p className="font-bold text-white text-base">{displayLabel}</p>
                                 <p className="text-sm mt-1" style={{ color }}>
-                                    {(lastResult.confidence * 100).toFixed(1)}% confidence
+                                    {(lastResult.confidence * 100).toFixed(1)}% {t.live.confidence}
                                 </p>
                             </div>
                             <div className="space-y-1.5">
@@ -185,8 +258,8 @@ export default function LivePage() {
                                     </div>
                                 ))}
                             </div>
-                            <p className="text-gray-600 text-xs text-center">
-                                {new Date(lastResult.captured_at).toLocaleString("vi-VN")}
+                            <p className="text-gray-500 text-xs text-center">
+                                {formatSafeDate(lastResult.captured_at, language)}
                             </p>
                             {advice && (
                                 <div className="rounded-xl border border-gray-800 bg-gray-800/50 p-3">
