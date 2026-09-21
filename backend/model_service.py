@@ -1,5 +1,6 @@
 """
 AI inference service for jackfruit tree and fruit disease classification.
+Optimized with on-demand (lazy) loading and low-memory profile for cloud deployment.
 """
 import json
 import math
@@ -12,6 +13,12 @@ import torch
 from dotenv import load_dotenv
 from PIL import Image, ImageChops, ImageStat
 from torchvision import models, transforms
+
+# Limit PyTorch CPU threads to prevent memory explosion on cloud containers
+try:
+    torch.set_num_threads(1)
+except Exception:
+    pass
 
 yolo_config_path = Path(__file__).parent.parent / ".ultralytics"
 yolo_config_path.mkdir(parents=True, exist_ok=True)
@@ -48,8 +55,6 @@ JACKFRUIT_CLASS_NAMES = os.getenv(
 BASE_DIR = Path(__file__).parent.parent
 NOT_JACKFRUIT_CLASS = "not_jackfruit"
 
-# Disease-only classifiers otherwise force every arbitrary image into a disease
-# class. These thresholds provide a conservative out-of-domain gate.
 SUBJECT_CONFIDENCE_THRESHOLD = float(os.getenv("SUBJECT_CONFIDENCE_THRESHOLD", "0.80"))
 SUBJECT_MARGIN_THRESHOLD = float(os.getenv("SUBJECT_MARGIN_THRESHOLD", "0.20"))
 SUBJECT_ENTROPY_THRESHOLD = float(os.getenv("SUBJECT_ENTROPY_THRESHOLD", "0.78"))
@@ -76,12 +81,13 @@ CONFLICTING_OBJECTS = {
 
 
 class ModelService:
-    """Load and run YOLO classification models plus EfficientNet-B0 checkpoints."""
+    """Load and run YOLO classification models plus EfficientNet-B0 checkpoints with on-demand lazy loading."""
 
     def __init__(self):
         self.models: Dict[str, object] = {}
         self.model_types: Dict[str, str] = {}
         self.class_names: Dict[str, List[str]] = {}
+        self.available_candidates: Dict[str, tuple] = {}
         self.general_object_guard = None
         self.imagenet_guard = None
         self.roboflow_client = None
@@ -96,7 +102,7 @@ class ModelService:
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
-        self._load_models()
+        self._discover_models()
         self._configure_roboflow()
 
     def _configure_roboflow(self):
@@ -116,11 +122,9 @@ class ModelService:
             p = Path(raw_path)
             if p.exists():
                 return p
-            # Try resolving relative to BASE_DIR
             p_base = (BASE_DIR / raw_path).resolve()
             if p_base.exists():
                 return p_base
-            # Try stripping relative prefixes
             clean_name = p.name
             p_model = BASE_DIR / "models" / clean_name
             if p_model.exists():
@@ -131,86 +135,57 @@ class ModelService:
             return default_p
         return None
 
-    def _load_models(self):
+    def _discover_models(self):
         yolo_candidates = {
-            "best_11": (os.getenv("MODEL_PATH_11"), "best_11.pt"),
-            "best_26": (os.getenv("MODEL_PATH_26"), "best_26.pt"),
-            "jackfruit_yolov26m_cls": (os.getenv("JACKFRUIT_YOLO_MODEL_PATH"), "best.pt"),
+            "best_11": (os.getenv("MODEL_PATH_11"), "best_11.pt", "yolo_cls", CLASS_NAMES),
+            "best_26": (os.getenv("MODEL_PATH_26"), "best_26.pt", "yolo_cls", CLASS_NAMES),
+            "jackfruit_yolov26m_cls": (os.getenv("JACKFRUIT_YOLO_MODEL_PATH"), "best.pt", "yolo_cls", JACKFRUIT_CLASS_NAMES),
         }
         optional_detectors = {
-            "stem_branch_detector": (os.getenv("MODEL_PATH_STEM_DET"), "stem_det.pt"),
-            "jackfruit_detector": (os.getenv("MODEL_PATH_FRUIT_DET"), "fruit_det.pt"),
+            "stem_branch_detector": (os.getenv("MODEL_PATH_STEM_DET"), "stem_det.pt", "yolo_detect", []),
+            "jackfruit_detector": (os.getenv("MODEL_PATH_FRUIT_DET"), "fruit_det.pt", "yolo_detect", []),
         }
 
-        for name, (raw_path, def_name) in yolo_candidates.items():
+        for name, (raw_path, def_name, mtype, cnames) in {**yolo_candidates, **optional_detectors}.items():
             resolved = self._resolve_path(raw_path, def_name)
             if resolved and resolved.exists():
-                print(f"[ModelService] Loading YOLO model: {name} from {resolved}")
-                model = YOLO(str(resolved))
-                self.models[name] = model
-                self.model_types[name] = "yolo_detect" if model.task == "detect" else "yolo_cls"
-                self.class_names[name] = list(model.names.values())
-                print(f"[ModelService] OK: {name} loaded")
+                self.available_candidates[name] = (resolved, mtype, cnames)
+                self.model_types[name] = mtype
+                self.class_names[name] = cnames
+                print(f"[ModelService] Discovered model: {name} at {resolved.name}")
             else:
-                print(f"[ModelService] Model not found: {raw_path or def_name}")
-
-        for name, (raw_path, def_name) in optional_detectors.items():
-            if raw_path:
-                resolved = self._resolve_path(raw_path, def_name)
-                if resolved and resolved.exists():
-                    model = YOLO(str(resolved))
-                    self.models[name] = model
-                    self.model_types[name] = "yolo_detect" if model.task == "detect" else "yolo_cls"
-                    self.class_names[name] = list(model.names.values())
-                    print(f"[ModelService] OK: {name} loaded")
+                print(f"[ModelService] Model file not found: {raw_path or def_name}")
 
         eff_resolved = self._resolve_path(
             os.getenv("JACKFRUIT_EFFICIENTNET_MODEL_PATH"), "best_jackfruit_model.pth"
         )
         if eff_resolved and eff_resolved.exists():
-            try:
-                print(f"[ModelService] Loading EfficientNet-B0 model from {eff_resolved}")
-                self._load_efficientnet("jackfruit_efficientnet_b0", str(eff_resolved))
-                print("[ModelService] OK: jackfruit_efficientnet_b0 loaded")
-            except Exception as exc:
-                print(f"[ModelService] Cannot load EfficientNet-B0 model {eff_resolved}: {exc}")
-        else:
-            print(f"[ModelService] Model not found: best_jackfruit_model.pth")
+            self.available_candidates["jackfruit_efficientnet_b0"] = (eff_resolved, "efficientnet_b0", JACKFRUIT_CLASS_NAMES)
+            self.model_types["jackfruit_efficientnet_b0"] = "efficientnet_b0"
+            self.class_names["jackfruit_efficientnet_b0"] = JACKFRUIT_CLASS_NAMES
+            print(f"[ModelService] Discovered model: jackfruit_efficientnet_b0 at {eff_resolved.name}")
 
-        gen_guard_resolved = self._resolve_path(
-            os.getenv("GENERAL_OBJECT_MODEL_PATH"), "yolo11n_general.pt"
-        )
-        if gen_guard_resolved and gen_guard_resolved.exists():
-            self.general_object_guard = YOLO(str(gen_guard_resolved))
-            print("[ModelService] OK: general object guard loaded")
+    def get_model(self, name: str):
+        if name in self.models:
+            return self.models[name]
+        if name not in self.available_candidates:
+            return None
 
-        img_guard_resolved = self._resolve_path(
-            os.getenv("IMAGENET_GUARD_MODEL_PATH"), "efficientnet_b0_imagenet.pth"
-        )
-        if img_guard_resolved and img_guard_resolved.exists():
-            self.imagenet_guard = models.efficientnet_b0(weights=None)
-            state_dict = torch.load(str(img_guard_resolved), map_location=self.device, weights_only=True)
-            self.imagenet_guard.load_state_dict(state_dict)
-            self.imagenet_guard.to(self.device).eval()
-            print("[ModelService] OK: ImageNet jackfruit guard loaded")
-
-        fruit_id_resolved = self._resolve_path(
-            os.getenv("FRUIT_IDENTITY_MODEL_PATH"), "fruit_100_vit"
-        )
-        if (
-            fruit_id_resolved
-            and fruit_id_resolved.exists()
-            and AutoImageProcessor is not None
-            and AutoModelForImageClassification is not None
-            and (fruit_id_resolved / "model.safetensors").exists()
-        ):
-            self.fruit_identity_processor = AutoImageProcessor.from_pretrained(
-                str(fruit_id_resolved), local_files_only=True, use_fast=True
-            )
-            self.fruit_identity_model = AutoModelForImageClassification.from_pretrained(
-                str(fruit_id_resolved), local_files_only=True
-            ).to(self.device).eval()
-            print("[ModelService] OK: ViT 100-fruit identity guard loaded")
+        resolved, mtype, cnames = self.available_candidates[name]
+        print(f"[ModelService] On-demand loading: {name} ({resolved.name})...")
+        try:
+            if mtype == "efficientnet_b0":
+                self._load_efficientnet(name, str(resolved))
+            else:
+                model = YOLO(str(resolved))
+                self.models[name] = model
+                self.model_types[name] = "yolo_detect" if model.task == "detect" else "yolo_cls"
+                if hasattr(model, "names") and model.names:
+                    self.class_names[name] = list(model.names.values())
+            print(f"[ModelService] OK: {name} loaded in memory.")
+        except Exception as exc:
+            print(f"[ModelService] Error loading model {name}: {exc}")
+        return self.models.get(name)
 
     def _load_efficientnet(self, name: str, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
@@ -267,6 +242,57 @@ class ModelService:
             names = names + [f"class_{idx}" for idx in range(len(names), num_classes)]
         return names[:num_classes]
 
+    def _get_general_guard(self):
+        if self.general_object_guard is not None:
+            return self.general_object_guard
+        try:
+            gen_guard_resolved = self._resolve_path(os.getenv("GENERAL_OBJECT_MODEL_PATH"), "yolo11n_general.pt")
+            if gen_guard_resolved and gen_guard_resolved.exists():
+                self.general_object_guard = YOLO(str(gen_guard_resolved))
+                print("[ModelService] OK: general object guard loaded")
+        except Exception as exc:
+            print(f"[ModelService] General guard not loaded: {exc}")
+        return self.general_object_guard
+
+    def _get_imagenet_guard(self):
+        if self.imagenet_guard is not None:
+            return self.imagenet_guard
+        try:
+            img_guard_resolved = self._resolve_path(os.getenv("IMAGENET_GUARD_MODEL_PATH"), "efficientnet_b0_imagenet.pth")
+            if img_guard_resolved and img_guard_resolved.exists():
+                guard = models.efficientnet_b0(weights=None)
+                state_dict = torch.load(str(img_guard_resolved), map_location=self.device, weights_only=True)
+                guard.load_state_dict(state_dict)
+                guard.to(self.device).eval()
+                self.imagenet_guard = guard
+                print("[ModelService] OK: ImageNet jackfruit guard loaded")
+        except Exception as exc:
+            print(f"[ModelService] ImageNet guard not loaded: {exc}")
+        return self.imagenet_guard
+
+    def _get_fruit_identity_model(self):
+        if self.fruit_identity_model is not None and self.fruit_identity_processor is not None:
+            return self.fruit_identity_model, self.fruit_identity_processor
+        try:
+            fruit_id_resolved = self._resolve_path(os.getenv("FRUIT_IDENTITY_MODEL_PATH"), "fruit_100_vit")
+            if (
+                fruit_id_resolved
+                and fruit_id_resolved.exists()
+                and AutoImageProcessor is not None
+                and AutoModelForImageClassification is not None
+                and (fruit_id_resolved / "model.safetensors").exists()
+            ):
+                self.fruit_identity_processor = AutoImageProcessor.from_pretrained(
+                    str(fruit_id_resolved), local_files_only=True, use_fast=True
+                )
+                self.fruit_identity_model = AutoModelForImageClassification.from_pretrained(
+                    str(fruit_id_resolved), local_files_only=True
+                ).to(self.device).eval()
+                print("[ModelService] OK: ViT 100-fruit identity guard loaded")
+        except Exception as exc:
+            print(f"[ModelService] ViT guard not loaded: {exc}")
+        return self.fruit_identity_model, self.fruit_identity_processor
+
     def predict(self, image: Image.Image, model_name: str = "auto") -> dict:
         """
         Run inference on an image.
@@ -279,10 +305,10 @@ class ModelService:
         if guard_reason:
             return self._rejected_result(model_name, guard_reason)
 
-        if model_name not in self.models:
-            available = list(self.models.keys())
+        if model_name not in self.available_candidates:
+            available = list(self.available_candidates.keys())
             if not available:
-                raise ValueError("Khong co model nao duoc load!")
+                raise ValueError("Khong co model nao duoc tim thay!")
             model_name = available[0]
 
         model_type = self.model_types.get(model_name, "yolo_cls")
@@ -310,9 +336,9 @@ class ModelService:
         candidates = []
         tree_model = os.getenv("TREE_DISEASE_MODEL", "best_11")
         fruit_model = os.getenv("FRUIT_DISEASE_MODEL", "jackfruit_yolov26m_cls")
-        if tree_model in self.models:
+        if tree_model in self.available_candidates:
             candidates.append(("tree", tree_model))
-        if fruit_model in self.models:
+        if fruit_model in self.available_candidates:
             candidates.append(("fruit", fruit_model))
         return candidates
 
@@ -406,9 +432,6 @@ class ModelService:
         candidates.sort(key=lambda item: item[0], reverse=True)
         selected = candidates[0]
         if len(candidates) > 1 and candidates[0][0] - candidates[1][0] < SUBJECT_AMBIGUITY_THRESHOLD:
-            # Tree classifiers have no healthy/other class and therefore tend
-            # to be over-confident on fruit. Prefer the specialised fruit
-            # classifier only in this near-tie; otherwise keep the strongest.
             selected = next((item for item in candidates if item[1] == "fruit"), selected)
 
         _, subject_type, result = selected
@@ -448,13 +471,15 @@ class ModelService:
             confidence = float(prediction.get("confidence", 0.0))
             if confidence < ROBOFLOW_FRUIT_THRESHOLD:
                 continue
-            class_name = str(prediction.get("class", prediction.get("class_name", "unknown")))
+
+            x = float(prediction.get("x", 0.0))
+            y = float(prediction.get("y", 0.0))
             width = float(prediction.get("width", 0.0))
             height = float(prediction.get("height", 0.0))
-            x = float(prediction.get("x", 0.0)) - width / 2
-            y = float(prediction.get("y", 0.0)) - height / 2
-            normalized_x = max(0.0, min(1.0, x / image_width))
-            normalized_y = max(0.0, min(1.0, y / image_height))
+            class_name = str(prediction.get("class", "fruit")).strip()
+
+            normalized_x = max(0.0, min(1.0, (x - width / 2.0) / image_width))
+            normalized_y = max(0.0, min(1.0, (y - height / 2.0) / image_height))
             boxes.append({
                 "x": round(normalized_x, 5),
                 "y": round(normalized_y, 5),
@@ -474,59 +499,65 @@ class ModelService:
         return {"status": "no_fruit", "boxes": [], "classes": []}
 
     def _classify_vit_fruit_identity(self, image: Image.Image) -> dict:
-        if self.fruit_identity_model is None or self.fruit_identity_processor is None:
+        vit_model, vit_processor = self._get_fruit_identity_model()
+        if vit_model is None or vit_processor is None:
             return {"status": "unavailable", "class_name": "unknown", "confidence": 0.0}
-        inputs = self.fruit_identity_processor(images=image, return_tensors="pt")
-        inputs = {name: tensor.to(self.device) for name, tensor in inputs.items()}
-        with torch.no_grad():
-            probabilities = torch.softmax(self.fruit_identity_model(**inputs).logits, dim=1)[0]
+        try:
+            inputs = vit_processor(images=image, return_tensors="pt")
+            inputs = {name: tensor.to(self.device) for name, tensor in inputs.items()}
+            with torch.no_grad():
+                probabilities = torch.softmax(vit_model(**inputs).logits, dim=1)[0]
 
-        values, indices = torch.topk(probabilities, k=min(5, len(probabilities)))
-        scores = {
-            str(self.fruit_identity_model.config.id2label[int(index)]).strip().lower(): float(value)
-            for value, index in zip(values.tolist(), indices.tolist())
-        }
-        top_class = next(iter(scores), "unknown")
-        top_confidence = scores.get(top_class, 0.0)
-        label_by_index = {
-            int(index): str(label).strip().lower()
-            for index, label in self.fruit_identity_model.config.id2label.items()
-        }
-        jackfruit_index = next(
-            (index for index, label in label_by_index.items() if label == "jackfruit"),
-            None,
-        )
-        if jackfruit_index is None:
-            jackfruit_confidence = 0.0
-            jackfruit_rank = len(probabilities) + 1
-        else:
-            jackfruit_probability = probabilities[jackfruit_index]
-            jackfruit_confidence = float(jackfruit_probability)
-            jackfruit_rank = int((probabilities > jackfruit_probability).sum().item()) + 1
-        second_confidence = list(scores.values())[1] if len(scores) > 1 else 0.0
+            values, indices = torch.topk(probabilities, k=min(5, len(probabilities)))
+            scores = {
+                str(vit_model.config.id2label[int(index)]).strip().lower(): float(value)
+                for value, index in zip(values.tolist(), indices.tolist())
+            }
+            top_class = next(iter(scores), "unknown")
+            top_confidence = scores.get(top_class, 0.0)
+            label_by_index = {
+                int(index): str(label).strip().lower()
+                for index, label in vit_model.config.id2label.items()
+            }
+            jackfruit_index = next(
+                (index for index, label in label_by_index.items() if label == "jackfruit"),
+                None,
+            )
+            if jackfruit_index is None:
+                jackfruit_confidence = 0.0
+                jackfruit_rank = len(probabilities) + 1
+            else:
+                jackfruit_probability = probabilities[jackfruit_index]
+                jackfruit_confidence = float(jackfruit_probability)
+                jackfruit_rank = int((probabilities > jackfruit_probability).sum().item()) + 1
+            second_confidence = list(scores.values())[1] if len(scores) > 1 else 0.0
 
-        if (
-            top_class == "jackfruit"
-            and top_confidence >= FRUIT_IDENTITY_JACKFRUIT_MIN_CONFIDENCE
-            and top_confidence - second_confidence >= FRUIT_IDENTITY_JACKFRUIT_MIN_MARGIN
-        ):
-            status = "jackfruit"
-        elif top_class != "jackfruit" and top_confidence >= FRUIT_IDENTITY_OTHER_MIN_CONFIDENCE:
-            status = "other_fruit"
-        else:
-            status = "uncertain"
-        return {
-            "status": status,
-            "class_name": top_class,
-            "confidence": round(top_confidence, 4),
-            "jackfruit_confidence": round(jackfruit_confidence, 4),
-            "jackfruit_rank": jackfruit_rank,
-            "scores": scores,
-        }
+            if (
+                top_class == "jackfruit"
+                and top_confidence >= FRUIT_IDENTITY_JACKFRUIT_MIN_CONFIDENCE
+                and top_confidence - second_confidence >= FRUIT_IDENTITY_JACKFRUIT_MIN_MARGIN
+            ):
+                status = "jackfruit"
+            elif top_class != "jackfruit" and top_confidence >= FRUIT_IDENTITY_OTHER_MIN_CONFIDENCE:
+                status = "other_fruit"
+            else:
+                status = "uncertain"
+            return {
+                "status": status,
+                "class_name": top_class,
+                "confidence": round(top_confidence, 4),
+                "jackfruit_confidence": round(jackfruit_confidence, 4),
+                "jackfruit_rank": jackfruit_rank,
+                "scores": scores,
+            }
+        except Exception as exc:
+            print(f"[ModelService] ViT identity error: {exc}")
+            return {"status": "unavailable", "class_name": "unknown", "confidence": 0.0}
 
     def _classify_vit_confirmed_jackfruit(self, image: Image.Image, identity: dict) -> dict:
         fruit_model = os.getenv("FRUIT_DISEASE_MODEL", "jackfruit_yolov26m_cls")
-        result = self._predict_raw(image, fruit_model) if fruit_model in self.models else self._predict_raw(image, "best_11")
+        target_model = fruit_model if fruit_model in self.available_candidates else "best_11"
+        result = self._predict_raw(image, target_model)
         return {
             **result,
             "is_jackfruit": True,
@@ -548,7 +579,8 @@ class ModelService:
         crop = image.crop((left, top, right, bottom))
 
         fruit_model = os.getenv("FRUIT_DISEASE_MODEL", "jackfruit_yolov26m_cls")
-        result = self._predict_raw(crop, fruit_model) if fruit_model in self.models else self._predict_raw(image, "best_11")
+        target_model = fruit_model if fruit_model in self.available_candidates else "best_11"
+        result = self._predict_raw(crop, target_model)
         return {
             **result,
             "boxes": boxes,
@@ -576,32 +608,38 @@ class ModelService:
         if ImageStat.Stat(horizontal_difference).mean[0] > 50.0:
             return "Ảnh bị nhiễu hoặc không đủ rõ để nhận diện."
 
-        if self.general_object_guard is None:
+        gen_guard = self._get_general_guard()
+        if gen_guard is None:
             return None
 
-        result = self.general_object_guard(image, verbose=False, conf=GENERAL_OBJECT_THRESHOLD)[0]
-        conflicts = []
-        if result.boxes is not None:
-            for cls_idx in result.boxes.cls.tolist():
-                name = result.names.get(int(cls_idx), "")
-                if name in CONFLICTING_OBJECTS:
-                    conflicts.append(name)
-        if not conflicts:
-            return None
-
-        # A person may legitimately stand beside or hold a jackfruit. ImageNet
-        # has a dedicated jackfruit class, so use it only to override that case.
-        if self.imagenet_guard is not None:
-            tensor = self.efficientnet_transform(image).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                probability = torch.softmax(self.imagenet_guard(tensor), dim=1)[0, 955].item()
-            if probability >= JACKFRUIT_IMAGENET_THRESHOLD:
+        try:
+            result = gen_guard(image, verbose=False, conf=GENERAL_OBJECT_THRESHOLD)[0]
+            conflicts = []
+            if result.boxes is not None:
+                for cls_idx in result.boxes.cls.tolist():
+                    name = result.names.get(int(cls_idx), "")
+                    if name in CONFLICTING_OBJECTS:
+                        conflicts.append(name)
+            if not conflicts:
                 return None
 
-        return "Phát hiện vật thể khác (%s), không phân tích bệnh." % ", ".join(sorted(set(conflicts)))
+            img_guard = self._get_imagenet_guard()
+            if img_guard is not None:
+                tensor = self.efficientnet_transform(image).unsqueeze(0).to(self.device)
+                with torch.no_grad():
+                    probability = torch.softmax(img_guard(tensor), dim=1)[0, 955].item()
+                if probability >= JACKFRUIT_IMAGENET_THRESHOLD:
+                    return None
+
+            return "Phát hiện vật thể khác (%s), không phân tích bệnh." % ", ".join(sorted(set(conflicts)))
+        except Exception as exc:
+            print(f"[ModelService] Guard evaluation error: {exc}")
+            return None
 
     def _predict_yolo(self, image: Image.Image, model_name: str) -> dict:
-        model = self.models[model_name]
+        model = self.get_model(model_name)
+        if model is None:
+            raise ValueError(f"Không thể khởi động model: {model_name}")
         results = model(image, verbose=False)
         result = results[0]
 
@@ -627,7 +665,10 @@ class ModelService:
         }
 
     def _predict_detection(self, image: Image.Image, model_name: str) -> dict:
-        result = self.models[model_name](image, verbose=False)[0]
+        model = self.get_model(model_name)
+        if model is None:
+            raise ValueError(f"Không thể khởi động model: {model_name}")
+        result = model(image, verbose=False)[0]
         width, height = image.size
         boxes = []
         if result.boxes is not None:
@@ -649,7 +690,9 @@ class ModelService:
         }
 
     def _predict_efficientnet(self, image: Image.Image, model_name: str) -> dict:
-        model = self.models[model_name]
+        model = self.get_model(model_name)
+        if model is None:
+            raise ValueError(f"Không thể khởi động model: {model_name}")
         tensor = self.efficientnet_transform(image).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
@@ -686,7 +729,7 @@ class ModelService:
                 "type": self.model_types.get(name, "unknown"),
                 "class_names": self.class_names.get(name, []),
             }
-            for name in self.models.keys()
+            for name in sorted(self.available_candidates.keys())
         ]
 
 
