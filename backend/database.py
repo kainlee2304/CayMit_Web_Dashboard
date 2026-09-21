@@ -10,6 +10,10 @@ load_dotenv()
 # SQLite cho local dev (không cần cài PostgreSQL)
 # Đổi DATABASE_URL trong .env khi deploy production
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./caymit.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("postgresql+"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
